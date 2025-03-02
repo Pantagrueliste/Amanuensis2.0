@@ -124,23 +124,28 @@ def main():
                 processor = TEIProcessor(ui.config)
                 suggestion_generator = SuggestionGenerator(ui.config)
                 
-                # Extract abbreviations
+                # Extract abbreviations from the TEI document
                 abbreviations, tree = processor.parse_document(args.process)
                 
-                # Process each abbreviation
                 expanded_count = 0
                 for abbr in abbreviations:
-                    # Generate suggestions (using normalized form for dictionary lookup)
+                    # IMPORTANT: Use only the isolated abbreviation (normalized form)
+                    # rather than the full sentence. This ensures that generate_suggestions
+                    # receives "incu$ming" (for example) rather than a longer string.
+                    lookup = abbr.normalized_form.strip() if abbr.normalized_form else ""
+                    if not lookup:
+                        continue
+                    
                     suggestions = suggestion_generator.generate_suggestions(
-                        abbr.normalized_form or "",  # Use normalized form for lookup
-                        "",  # Context is not needed with the new approach
-                        "",  # Context is not needed with the new approach
-                        abbr.metadata,
-                        normalized_abbr=abbr.normalized_form
+                        abbreviation=lookup,
+                        context_before="",  # Provide context here if available
+                        context_after="",
+                        metadata=abbr.metadata,
+                        normalized_abbr=lookup
                     )
                     
                     if suggestions:
-                        # Use highest confidence suggestion
+                        # Use the highest confidence suggestion
                         expansion = suggestions[0]['expansion']
                         if processor.add_expansion(abbr, expansion):
                             expanded_count += 1
@@ -153,7 +158,7 @@ def main():
                 print(f"Output saved to {output_path}")
                 
             else:
-                # Interactive mode for single file
+                # Interactive mode for a single file
                 output_dir = ui.config.get("paths", "output_path")
                 ui._process_single_tei_file(args.process, output_dir)
         else:

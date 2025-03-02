@@ -453,43 +453,36 @@ class TEIProcessor:
                     text_before_g += child.text
                 if hasattr(child, 'tail') and child.tail:
                     text_before_g += child.tail
+                    
+            # We need to keep the text after g_el as it's part of the same word
             text_after_g = ''
             if g_el.tail:
-                # Check if the tail starts with whitespace or specific characters
-                # indicating a word boundary - if so, don't include anything after
-                # the first whitespace in the abbreviation
                 tail = g_el.tail
+                # Include all text up to the first whitespace, which indicates word boundary
                 if ' ' in tail or '\t' in tail or '\n' in tail:
-                    # Only take up to the first whitespace
                     first_space = min(pos for pos in [
                         tail.find(' '), 
                         tail.find('\t'), 
                         tail.find('\n')
                     ] if pos >= 0) if any(c in tail for c in [' ', '\t', '\n']) else len(tail)
-                    # Don't include text after whitespace - it's a new word
-                    return text_before_g.strip() + "$"
+                    text_after_g += tail[:first_space]
                 else:
                     # If no whitespace, check if there's another word boundary indicator
-                    # like uppercase letters or punctuation
-                    boundary_found = False
+                    # like uppercase letters or punctuation, but include all text as part of the word
+                    # until we find a clear boundary
                     for i, char in enumerate(tail):
-                        if i > 0 and (char.isupper() or char in 'ſoaiuerf:;.,'):
-                            # Found a word boundary, don't include anything after
-                            boundary_found = True
+                        if i > 0 and (char.isupper() or char in ':;.,'):
+                            text_after_g += tail[:i]
                             break
-                    
-                    if boundary_found:
-                        # Found a word boundary - don't include text after
-                        return text_before_g.strip()[:-1] + text_before_g.strip()[-1] + "$"
                     else:
-                        # No word boundary found, use the whole tail - probably part of same word
+                        # No boundary found - include whole tail
                         text_after_g += tail
             
+            # Check for text in subsequent siblings that might be part of the same word
             found_g = False
             for child in parent:
                 if found_g and child is not g_el:
                     if hasattr(child, 'text') and child.text:
-                        # Same logic for child text - check for word boundaries
                         text = child.text
                         if ' ' in text or '\t' in text or '\n' in text:
                             first_space = min(pos for pos in [
@@ -501,7 +494,7 @@ class TEIProcessor:
                             break
                         else:
                             for i, char in enumerate(text):
-                                if i > 0 and (char.isupper() or char in 'ſoaiuerf:;.,'):
+                                if i > 0 and (char.isupper() or char in ':;.,'):
                                     text_after_g += text[:i]
                                     break
                             else:
@@ -513,25 +506,14 @@ class TEIProcessor:
                         break
                 if child is g_el:
                     found_g = True
-            if text_before_g or text_after_g:
-                if text_before_g and text_before_g.strip():
-                    last_char = text_before_g.strip()[-1]
                     
-                    # If there's text after, include it only if it's part of the same word
-                    result = text_before_g.strip()[:-1] + last_char + "$" + text_after_g.strip()
-                    
-                    return result
-                else:
-                    return text_before_g.strip() + "m$" + text_after_g.strip()
-            parent_text = self._get_element_text_content(parent)
-            if parent_text:
-                words = parent_text.split()
-                for word in words:
-                    if len(word) > 2:
-                        for i in range(1, len(word)-1):
-                            if word[i] in "aeioumn":
-                                return word[:i+1] + "$" + word[i+1:]
-            self.logger.warning("Could not reconstruct full word context for abbreviation")
+            # Construct the normalized form with the text before + $ + text after
+            if text_before_g and text_before_g.strip():
+                result = text_before_g.strip() + "$" + text_after_g.strip()
+                return result
+            else:
+                return "m$" + text_after_g.strip()
+                
             return "m$"
         elif ref == 'char:abque':
             parent = g_el.getparent()

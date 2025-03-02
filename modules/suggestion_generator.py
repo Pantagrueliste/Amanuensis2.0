@@ -1,4 +1,4 @@
-#\!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Suggestion Generator Module for Amanuensis 2.0
 
@@ -162,9 +162,6 @@ class SuggestionGenerator:
         if not lookup_abbr:
             return []
 
-        # Clean any fused words in the abbreviation
-        lookup_abbr = self._clean_fused_word(lookup_abbr)
-
         suggestions = []
         all_candidates = []
 
@@ -237,56 +234,6 @@ class SuggestionGenerator:
 
         return sorted(suggestions, key=lambda x: x['confidence'], reverse=True)
 
-    def _clean_fused_word(self, word: str) -> str:
-        """
-        Separate a fused word containing an abbreviation marker.
-        
-        Examples:
-        - conditiou$ſaulffing -> conditiou$
-        - preſeruatiou$of -> preſeruatiou$
-        """
-        if not word:
-            return word
-            
-        # Handle multiple-word inputs first (separated by spaces)
-        if ' ' in word:
-            words = word.split()
-            for i, token in enumerate(words):
-                if '$' in token or any(char in token for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
-                    # Found the token with abbreviation marker
-                    return self._clean_fused_word(token)
-            # No special marker found, return the first word
-            return words[0] if words else word
-            
-        # Now handle single tokens with possibly fused words
-        if '$' in word:
-            # Find the position of $ and extract up to that point plus one character
-            dollar_pos = word.find('$')
-            if dollar_pos >= 0 and dollar_pos < len(word) - 1:
-                # Check if the character after $ is uppercase or a special character
-                next_char_pos = dollar_pos + 1
-                if next_char_pos < len(word):
-                    # If the next character marks the beginning of a new word
-                    if word[next_char_pos].isupper() or word[next_char_pos] in 'ſ:;., ':
-                        return word[:next_char_pos]
-                    
-                    # Continue scanning until probable word boundary
-                    for i in range(next_char_pos, len(word)):
-                        if word[i].isupper() or word[i] in 'ſ:;., ' or word[i].isdigit():
-                            return word[:i]
-        
-        # Also check for other abbreviation markers
-        for marker in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']:
-            if marker in word:
-                marker_pos = word.find(marker)
-                if marker_pos >= 0 and marker_pos < len(word) - 1:
-                    # Continue scanning until probable word boundary 
-                    for i in range(marker_pos + 1, len(word)):
-                        if word[i].isupper() or word[i] in 'ſ:;., ' or word[i].isdigit():
-                            return word[:i]
-                            
-        return word
-
     def _extract_single_word(self, expansion: str, abbreviation: str) -> str:
         """
         Force expansions to be a single word.
@@ -304,9 +251,6 @@ class SuggestionGenerator:
                     if '$' in token or any(char in token for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
                         abbreviation = token
                         break
-            
-            # Clean abbreviation if it's fused with next or previous word
-            abbreviation = self._clean_fused_word(abbreviation)
             
             # Generate potential replacements
             replacements = self._generate_candidates(abbreviation)
@@ -393,9 +337,6 @@ class SuggestionGenerator:
 
     def _generate_candidates(self, abbr: str) -> List[str]:
         candidates = []
-        # Clean any fused words first
-        abbr = self._clean_fused_word(abbr)
-        
         # Split abbreviation to handle only the token, not the whole context
         abbr_tokens = abbr.split()
         if len(abbr_tokens) > 1:
@@ -412,14 +353,14 @@ class SuggestionGenerator:
         if '$' in abbr:
             for replacement in ['n', 'm', 'r', 'v', 'u']:
                 candidate = abbr.replace('$', replacement)
-                if candidate not in candidates and candidate \!= abbr:
+                if candidate not in candidates and candidate != abbr:
                     candidates.append(candidate)
 
         for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']:
             if char in abbr:
                 for replacement in ['on', 'om', 'ons']:
                     candidate = abbr.replace(char, replacement)
-                    if candidate not in candidates and candidate \!= abbr:
+                    if candidate not in candidates and candidate != abbr:
                         candidates.append(candidate)
         return candidates
 

@@ -4,9 +4,9 @@
 
 [paths]
 # File system paths for input and output
-input_path = "/Users/clementgodbarge/Amanuensis/Amanuensis2.0/samples"
-output_path = "/Users/clementgodbarge/Amanuensis/Amanuensis2.0/output"
-discarded_directory = "/Users/clementgodbarge/Amanuensis/Amanuensis2.0/discarded"
+input_path = "/Users/clementgodbarge/Amanuensis2.0/samples"
+output_path = "/Users/clementgodbarge/Amanuensis2.0/output"
+discarded_directory = "/Users/clementgodbarge/Amanuensis2.0/discarded"
 
 [data]
 # Data file locations for various dictionaries and datasets

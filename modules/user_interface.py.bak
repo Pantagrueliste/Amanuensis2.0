@@ -311,10 +311,56 @@ class UserInterface:
     
     def _clean_display_text(self, text: str) -> str:
         """
-        Clean text for display. For abbreviations, do not remove any content
-        as we want to show the full word including text after the $ symbol.
+        Clean fused words in display text, especially for abbreviations
         """
-        return text
+        if not text:
+            return text
+            
+        # Handle multiple-word inputs first (separated by spaces)
+        if ' ' in text:
+            words = text.split()
+            for i, token in enumerate(words):
+                if '$' in token or any(char in token for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
+                    # Found the token with abbreviation marker, focus on it
+                    return self._clean_single_token(token)
+            # No special marker found, return the first word
+            return words[0] if words else text
+        
+        # Process single tokens
+        return self._clean_single_token(text)
+        
+    def _clean_single_token(self, token: str) -> str:
+        """Clean a single token that may have a fused word."""
+        if not token:
+            return token
+            
+        # Handle $ character - most common abbreviation marker
+        if '$' in token:
+            dollar_pos = token.find('$')
+            if dollar_pos >= 0 and dollar_pos < len(token) - 1:
+                # Check for possible word boundaries after the $
+                next_char_pos = dollar_pos + 1
+                if next_char_pos < len(token):
+                    # If next char is uppercase or punctuation, it's a boundary
+                    if token[next_char_pos].isupper() or token[next_char_pos] in 'ſ:;., ':
+                        return token[:next_char_pos]
+                    
+                    # Check for word boundaries further on
+                    for i in range(next_char_pos, len(token)):
+                        if token[i].isupper() or token[i] in 'ſ:;., ' or token[i].isdigit():
+                            return token[:i]
+        
+        # Also check other abbreviation markers
+        for marker in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']:
+            if marker in token:
+                marker_pos = token.find(marker)
+                if marker_pos >= 0 and marker_pos < len(token) - 1:
+                    # Check for word boundaries after the marker
+                    for i in range(marker_pos + 1, len(token)):
+                        if token[i].isupper() or token[i] in 'ſ:;., ' or token[i].isdigit():
+                            return token[:i]
+        
+        return token
     
     def _interactive_expansion(self, abbreviations: List[AbbreviationInfo], tree) -> int:
         """
@@ -336,6 +382,19 @@ class UserInterface:
             
             # Clean fused words in the display text
             display_text = self._clean_display_text(display_text)
+            # Also remove any trailing context - sometimes abbreviations are fused with the next word
+            if '$' in display_text:
+                dollar_pos = display_text.find('$')
+                if dollar_pos >= 0 and dollar_pos < len(display_text) - 1:
+                    # Check for spaces after the dollar sign
+                    space_pos = display_text.find(' ', dollar_pos + 1)
+                    if space_pos > 0:
+                        display_text = display_text[:space_pos]
+                    # Also check for other word boundaries
+                    for i in range(dollar_pos + 1, len(display_text)):
+                        if i > dollar_pos + 1 and (display_text[i].isupper() or display_text[i] in 'ſoaiuerf:;.,'):
+                            display_text = display_text[:i]
+                            break
             
             # If display_text contains multiple words, pick the one with a special marker
             if len(display_text.split()) > 2:

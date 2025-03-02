@@ -455,27 +455,64 @@ class TEIProcessor:
                     text_before_g += child.tail
             text_after_g = ''
             if g_el.tail:
-                text_after_g += g_el.tail
+                # Check if the tail starts with whitespace or specific characters
+                # indicating a word boundary - if so, don't include anything after
+                # the first whitespace in the abbreviation
+                tail = g_el.tail
+                if ' ' in tail or '\t' in tail or '\n' in tail:
+                    # Only take up to the first whitespace
+                    first_space = min(pos for pos in [
+                        tail.find(' '), 
+                        tail.find('\t'), 
+                        tail.find('\n')
+                    ] if pos >= 0) if any(c in tail for c in [' ', '\t', '\n']) else len(tail)
+                    text_after_g += tail[:first_space]
+                else:
+                    # If no whitespace, check if there's another word boundary indicator
+                    # like uppercase letters or punctuation
+                    for i, char in enumerate(tail):
+                        if i > 0 and (char.isupper() or char in 'ſoaiuerf:;.,'):
+                            # Found a word boundary, take text up to this point
+                            text_after_g += tail[:i]
+                            break
+                    else:
+                        # No word boundary found, use the whole tail
+                        text_after_g += tail
+            
             found_g = False
             for child in parent:
                 if found_g and child is not g_el:
                     if hasattr(child, 'text') and child.text:
-                        text_after_g += child.text
+                        # Same logic for child text - check for word boundaries
+                        text = child.text
+                        if ' ' in text or '\t' in text or '\n' in text:
+                            first_space = min(pos for pos in [
+                                text.find(' '), 
+                                text.find('\t'), 
+                                text.find('\n')
+                            ] if pos >= 0) if any(c in text for c in [' ', '\t', '\n']) else len(text)
+                            text_after_g += text[:first_space]
+                            break
+                        else:
+                            for i, char in enumerate(text):
+                                if i > 0 and (char.isupper() or char in 'ſoaiuerf:;.,'):
+                                    text_after_g += text[:i]
+                                    break
+                            else:
+                                text_after_g += text
+                        break  # Only include text from the first element after g
+                    
                     if hasattr(child, 'tail') and child.tail:
-                        text_after_g += child.tail
+                        # Don't include tails from siblings
+                        break
                 if child is g_el:
                     found_g = True
             if text_before_g or text_after_g:
                 if text_before_g and text_before_g.strip():
                     last_char = text_before_g.strip()[-1]
                     
-                    # Check if text_after_g starts with a character that would indicate a new word
-                    if text_after_g and (text_after_g[0].isupper() or text_after_g[0] in 'ſoaiuerf:;.,'):
-                        # Likely a new word, don't include it in the abbreviation
-                        result = text_before_g.strip()[:-1] + last_char + "$"
-                    else:
-                        # Part of the same word, keep the traditional approach
-                        result = text_before_g.strip()[:-1] + last_char + "$" + text_after_g.strip()
+                    # If there's text after, include it only if it's part of the same word
+                    result = text_before_g.strip()[:-1] + last_char + "$" + text_after_g.strip()
                     
                     return result
                 else:

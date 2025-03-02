@@ -276,8 +276,9 @@ class UserInterface:
         expanded_count = 0
         
         for abbr in abbreviations:
+            # Use normalized_form instead of abbr_text to generate suggestions
             suggestions = self.suggestion_generator.generate_suggestions(
-                abbr.abbr_text,
+                abbr.normalized_form,
                 abbr.context_before,
                 abbr.context_after,
                 abbr.metadata,
@@ -308,6 +309,25 @@ class UserInterface:
         
         return expanded_count
     
+    def _clean_display_text(self, text: str) -> str:
+        """
+        Clean fused words in display text, especially for abbreviations
+        """
+        if '$' not in text:
+            return text
+        
+        # Find the position of $ and determine if characters after it might be a separate word
+        dollar_pos = text.find('$')
+        if dollar_pos >= 0 and dollar_pos < len(text) - 1:
+            # Check if the next character indicates a new word
+            next_char_pos = dollar_pos + 1
+            if next_char_pos < len(text):
+                # If the next character marks the beginning of a new word
+                if text[next_char_pos].isupper() or text[next_char_pos] in 'ſ:;.,oaiuerfm':
+                    return text[:next_char_pos]
+        
+        return text
+    
     def _interactive_expansion(self, abbreviations: List[AbbreviationInfo], tree) -> int:
         """
         Interactively expand abbreviations with user input.
@@ -323,12 +343,16 @@ class UserInterface:
 
         for i, abbr in enumerate(abbreviations, 1):
             element_tag = abbr.abbr_element.tag.split('}')[-1] if '}' in abbr.abbr_element.tag else abbr.abbr_element.tag
-            element_text = abbr.abbr_text if abbr.abbr_text else "Unknown"
+            # Prefer normalized_form for display if available
+            display_text = abbr.normalized_form if abbr.normalized_form else (abbr.abbr_text or "Unknown")
             
-            display_text = element_text
+            # Clean fused words in the display text
+            display_text = self._clean_display_text(display_text)
+            
+            # If display_text contains multiple words, pick the one with a special marker
             if len(display_text.split()) > 2:
                 for word in display_text.split():
-                    if '$' in word or 'õ' in word or 'ā' in word:
+                    if '$' in word or any(char in word for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
                         display_text = word
                         break
             
@@ -336,9 +360,12 @@ class UserInterface:
             
             if abbr.normalized_form:
                 normalized_display = abbr.normalized_form
+                # Clean fused words in normalized display
+                normalized_display = self._clean_display_text(normalized_display)
+                
                 if len(normalized_display.split()) > 2:
                     for word in normalized_display.split():
-                        if '$' in word or 'õ' in word or 'ā' in word:
+                        if '$' in word or any(char in word for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
                             normalized_display = word
                             break
                     if len(normalized_display.split()) > 2:
@@ -352,9 +379,9 @@ class UserInterface:
                 context_display = f"[magenta]{abbr.context_before}[/magenta] [bold yellow]{display_text}[/bold yellow] [magenta]{abbr.context_after}[/magenta]"
                 console.print(f"Context: {context_display}")
             
-            # Generate suggestions for the abbreviation
+            # Generate suggestions using the normalized abbreviation
             suggestions = self.suggestion_generator.generate_suggestions(
-                abbr.abbr_text,
+                abbr.normalized_form,
                 abbr.context_before,
                 abbr.context_after,
                 abbr.metadata,
@@ -387,8 +414,7 @@ class UserInterface:
             
             console.print(table)
             
-            choices = [str(i) for i in range(1, len(suggestions)+1)] + ["c", "s"]
-            choice = Prompt.ask("Select an option", choices=choices)
+            choice = Prompt.ask("Select an option", choices=[str(i) for i in range(1, len(suggestions)+1)] + ["c", "s"])
             console.print(f"[bold]You selected:[/bold] {choice}")
             
             if choice.lower() == "s":
@@ -400,10 +426,8 @@ class UserInterface:
             confidence = None
             
             if choice.lower() == "c":
-                # Display a panel as a visible custom expansion dialog
                 custom_panel = Panel.fit("Please type your custom expansion and press Enter", title="Custom Expansion", border_style="green")
                 console.print(custom_panel)
-                # Use console.input so that the typed characters are visible and editable
                 custom_exp = console.input("Custom Expansion: ").strip()
                 console.print(f"[bold]You entered custom expansion:[/bold] {custom_exp}")
                 if not custom_exp or len(custom_exp) <= 1:
@@ -567,13 +591,12 @@ class UserInterface:
                 pass
             
             suggestions = self.suggestion_generator.generate_suggestions(
-                abbr_text,
+                normalized_abbr if normalized_abbr else abbr_text,
                 context_before=context,
                 context_after="",
                 normalized_abbr=normalized_abbr
             )
             
-            # Filter out single character expansions if there are multi-character options
             suggestions = [s for s in suggestions if len(s['expansion']) > 1]
             
             if not suggestions:
@@ -644,8 +667,8 @@ class UserInterface:
         
         table.add_row("Documents Processed", str(tei_stats['documents_processed']))
         table.add_row("Abbreviations Found", str(tei_stats['abbreviations_found']))
-        table.add_row("Already Expanded", str(tei_stats['already_expanded']))
-        table.add_row("Malformed Abbreviations", str(tei_stats['malformed_abbr']))
+        table.add_row("Already Expanded", str(tei_stats.get('already_expanded', 0)))
+        table.add_row("Malformed Abbreviations", str(tei_stats.get('malformed_abbr', 0)))
         table.add_row("Current Session Expansions", str(self.abbreviations_expanded))
         
         console.print(table)

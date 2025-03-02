@@ -466,17 +466,23 @@ class TEIProcessor:
                         tail.find('\t'), 
                         tail.find('\n')
                     ] if pos >= 0) if any(c in tail for c in [' ', '\t', '\n']) else len(tail)
-                    text_after_g += tail[:first_space]
+                    # Don't include text after whitespace - it's a new word
+                    return text_before_g.strip() + "$"
                 else:
                     # If no whitespace, check if there's another word boundary indicator
                     # like uppercase letters or punctuation
+                    boundary_found = False
                     for i, char in enumerate(tail):
                         if i > 0 and (char.isupper() or char in 'ſoaiuerf:;.,'):
-                            # Found a word boundary, take text up to this point
-                            text_after_g += tail[:i]
+                            # Found a word boundary, don't include anything after
+                            boundary_found = True
                             break
+                    
+                    if boundary_found:
+                        # Found a word boundary - don't include text after
+                        return text_before_g.strip()[:-1] + text_before_g.strip()[-1] + "$"
                     else:
-                        # No word boundary found, use the whole tail
+                        # No word boundary found, use the whole tail - probably part of same word
                         text_after_g += tail
             
             found_g = False

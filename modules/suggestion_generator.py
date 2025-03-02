@@ -234,6 +234,34 @@ class SuggestionGenerator:
 
         return sorted(suggestions, key=lambda x: x['confidence'], reverse=True)
 
+    def _clean_fused_word(self, word: str) -> str:
+        """
+        Separate a fused word containing an abbreviation marker.
+        
+        Examples:
+        - conditiou$ſaulffing -> conditiou$
+        - preſeruatiou$of -> preſeruatiou$
+        """
+        if not word or '$' not in word:
+            return word
+            
+        # Find the position of $ and extract up to that point plus one character
+        dollar_pos = word.find('$')
+        if dollar_pos >= 0 and dollar_pos < len(word) - 1:
+            # Check if the character after $ is uppercase or a special character
+            next_char_pos = dollar_pos + 1
+            if next_char_pos < len(word):
+                # If the next character marks the beginning of a new word
+                if word[next_char_pos].isupper() or word[next_char_pos] in 'ſ:;.,':
+                    return word[:next_char_pos]
+                
+                # Continue scanning until probable word boundary
+                for i in range(next_char_pos, len(word)):
+                    if word[i].isupper() or word[i] in 'ſ:;.,':
+                        return word[:i]
+        
+        return word
+
     def _extract_single_word(self, expansion: str, abbreviation: str) -> str:
         """
         Force expansions to be a single word.
@@ -251,6 +279,9 @@ class SuggestionGenerator:
                     if '$' in token or any(char in token for char in ['ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ']):
                         abbreviation = token
                         break
+            
+            # Clean abbreviation if it's fused with next or previous word
+            abbreviation = self._clean_fused_word(abbreviation)
             
             # Generate potential replacements
             replacements = self._generate_candidates(abbreviation)
@@ -337,6 +368,9 @@ class SuggestionGenerator:
 
     def _generate_candidates(self, abbr: str) -> List[str]:
         candidates = []
+        # Clean any fused words first
+        abbr = self._clean_fused_word(abbr)
+        
         # Split abbreviation to handle only the token, not the whole context
         abbr_tokens = abbr.split()
         if len(abbr_tokens) > 1:

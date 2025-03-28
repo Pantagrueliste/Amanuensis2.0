@@ -290,7 +290,7 @@ class TEIProcessor:
         if not text:
             return text
         tokens = text.split()
-        special_chars = ['$', 'ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ', 'ſ']
+        special_chars = ['$', 'ā', 'ē', 'ī', 'ō', 'ū', 'ã', 'ẽ', 'ĩ', 'õ', 'ũ', 'ñ', 'ſ']
         for token in tokens:
             if any(ch in token for ch in special_chars):
                 return token.strip()
@@ -310,19 +310,10 @@ class TEIProcessor:
         full_text = self._get_element_text_content(abbr_el)
         normalized_form = self._extract_abbr_token(full_text)
         abbr_text = self._get_element_text_content(abbr_el)
-        context_before = ""
-        context_after = ""
-        prev_sibling = abbr_el.getprevious()
-        if prev_sibling is not None and prev_sibling.tail:
-            context_before = prev_sibling.tail.strip()
-        elif parent.text:
-            context_before = parent.text.strip()
-        next_sibling = abbr_el.getnext()
-        if next_sibling is not None and next_sibling.text:
-            context_after = next_sibling.text.strip()
-        elif abbr_el.tail:
-            context_after = abbr_el.tail.strip()
-            
+        
+        # Extract context while respecting structural boundaries
+        context_before, context_after = self._extract_context_respecting_structure(abbr_el, parent)
+        
         return AbbreviationInfo(
             abbr_element=abbr_el,
             abbr_id=abbr_id,
@@ -352,19 +343,10 @@ class TEIProcessor:
         xpath = self._get_xpath(g_el)
         normalized_form = self._normalize_g_element(g_el)
         abbr_text = self._get_element_text_content(g_el)
-        context_before = ""
-        context_after = ""
-        prev_sibling = g_el.getprevious()
-        if prev_sibling is not None and prev_sibling.tail:
-            context_before = prev_sibling.tail.strip()
-        elif parent.text:
-            context_before = parent.text.strip()
-        next_sibling = g_el.getnext()
-        if next_sibling is not None and next_sibling.text:
-            context_after = next_sibling.text.strip()
-        elif g_el.tail:
-            context_after = g_el.tail.strip()
-            
+        
+        # Extract context while respecting structural boundaries
+        context_before, context_after = self._extract_context_respecting_structure(g_el, parent)
+        
         return AbbreviationInfo(
             abbr_element=g_el,
             abbr_id=g_id,
@@ -390,19 +372,10 @@ class TEIProcessor:
         xpath = self._get_xpath(am_el)
         normalized_form = self._normalize_am_element(am_el)
         abbr_text = self._get_element_text_content(am_el)
-        context_before = ""
-        context_after = ""
-        prev_sibling = am_el.getprevious()
-        if prev_sibling is not None and prev_sibling.tail:
-            context_before = prev_sibling.tail.strip()
-        elif parent.text:
-            context_before = parent.text.strip()
-        next_sibling = am_el.getnext()
-        if next_sibling is not None and next_sibling.text:
-            context_after = next_sibling.text.strip()
-        elif am_el.tail:
-            context_after = am_el.tail.strip()
-            
+        
+        # Extract context while respecting structural boundaries
+        context_before, context_after = self._extract_context_respecting_structure(am_el, parent)
+        
         return AbbreviationInfo(
             abbr_element=am_el,
             abbr_id=am_id,
@@ -576,7 +549,137 @@ class TEIProcessor:
         period_regex = r'\.([a-z]{2})$'
         normalized = re.sub(period_regex, r'$\1', normalized)
         return normalized
-    
+        
+    def _extract_context_respecting_structure(self, element: etree.Element, parent: etree.Element) -> Tuple[str, str]:
+        """
+        Extract context before and after an element while respecting XML structural boundaries.
+        
+        This method ensures that context is only extracted from relevant sections of the document,
+        preventing unrelated text like titles from being included in the context.
+        
+        Args:
+            element: The XML element to extract context for
+            parent: The parent element containing the target element
+            
+        Returns:
+            Tuple of (context_before, context_after)
+        """
+        # Maximum context size in characters
+        max_context_size = self.config.get('xml_processing', 'context_window_size', 50)
+        
+        # Initialize context variables
+        context_before = ""
+        context_after = ""
+        
+        # Get the element's location within its parent
+        element_index = parent.index(element)
+        
+        # Check for structural boundaries
+        structural_tags = ['div', 'p', 'head', 'title', 'bibl', 'note', 'list', 'item', 'table']
+        
+        # Check if parent is a structural element - if so, only get context within that element
+        parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+        is_structural_parent = parent_tag in structural_tags
+        
+        # Get text directly from parent before this element
+        if parent.text and element_index == 0:
+            # If this is the first child, use parent's text as context_before
+            text = parent.text.strip()
+            if text:
+                # Only take the last portion to avoid including too much text
+                words = text.split()
+                context_words = min(10, len(words))  # Take at most 10 words
+                context_before = ' '.join(words[-context_words:])
+                
+        # Get text from previous siblings within structural boundaries
+        prev_context = []
+        for sibling in parent[:element_index]:
+            # If we're at a structural boundary, clear previously collected context
+            sibling_tag = sibling.tag.split('}')[-1] if '}' in sibling.tag else sibling.tag
+            if sibling_tag in structural_tags:
+                prev_context = []  # Reset context at structural boundaries
+                
+            # Add the sibling's text tail if it exists
+            if sibling.tail:
+                text = sibling.tail.strip()
+                if text:
+                    prev_context.append(text)
+                    
+            # If sibling has text content, add it too
+            text = self._get_element_text_content(sibling).strip()
+            if text:
+                prev_context.append(text)
+                
+        # Combine previous context elements, but limit to the last few
+        if prev_context:
+            # Only take the last few context chunks to avoid including too much
+            context_chunks = min(3, len(prev_context))
+            prev_context_text = ' '.join(prev_context[-context_chunks:])
+            
+            # Trim to max length from the end
+            if len(prev_context_text) > max_context_size:
+                prev_context_text = prev_context_text[-max_context_size:]
+                
+            # Combine with any existing context
+            if context_before:
+                context_before = prev_context_text + ' ' + context_before
+            else:
+                context_before = prev_context_text
+                
+        # Now handle context after the element
+        if element.tail:
+            context_after = element.tail.strip()
+            
+        # Get text from following siblings within structural boundaries
+        next_context = []
+        for sibling in parent[element_index+1:]:
+            # If we're at a structural boundary, stop collecting context
+            sibling_tag = sibling.tag.split('}')[-1] if '}' in sibling.tag else sibling.tag
+            if sibling_tag in structural_tags:
+                break
+                
+            # Add the sibling's text if it exists
+            if sibling.text:
+                text = sibling.text.strip()
+                if text:
+                    next_context.append(text)
+                    
+            # If sibling has text content, add it too
+            text = self._get_element_text_content(sibling).strip()
+            if text:
+                next_context.append(text)
+                
+            # Don't go beyond a few siblings
+            if len(next_context) >= 3:
+                break
+                
+        # Combine next context elements
+        if next_context:
+            next_context_text = ' '.join(next_context[:3])  # Take first few chunks
+            
+            # Trim to max length from the beginning
+            if len(next_context_text) > max_context_size:
+                next_context_text = next_context_text[:max_context_size]
+                
+            # Combine with any existing context
+            if context_after:
+                context_after = context_after + ' ' + next_context_text
+            else:
+                context_after = next_context_text
+        
+        # Clean up and limit the final context texts
+        context_before = context_before.strip()
+        context_after = context_after.strip()
+        
+        # Ensure context is not too long
+        if len(context_before) > max_context_size:
+            context_before = context_before[-max_context_size:]
+            
+        if len(context_after) > max_context_size:
+            context_after = context_after[:max_context_size]
+            
+        return context_before, context_after
+
     def add_expansion(self, abbr_info: AbbreviationInfo, expansion: str) -> bool:
         """
         Add an expansion to an abbreviation element, preserving XML structure.

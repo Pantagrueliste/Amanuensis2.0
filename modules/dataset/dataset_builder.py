@@ -58,7 +58,12 @@ class DatasetBuilder:
             'validation_entries': 0,
             'test_entries': 0,
             'skipped_entries': 0,
-            'duplicate_entries': 0
+            'duplicate_entries': 0,
+            'entries_with_expansion': 0,
+            'entries_without_expansion': 0,
+            'by_source_type': {},
+            'by_language': {},
+            'average_context_length': 0
         }
     
     def process_abbreviations(self, abbreviations: List[AbbreviationInfo]) -> List[Dict[str, Any]]:
@@ -101,29 +106,85 @@ class DatasetBuilder:
             return None
         
         entry = {
-            'abbreviation': abbr.abbr_text,
+            'abbreviation': abbr.abbr_text or abbr.normalized_form,
+            'normalized_form': abbr.normalized_form,
             'id': abbr.abbr_id or f"abbr_{hash(abbr.abbr_text + abbr.file_path)}"
         }
         
+        # For proper LLM training, calculate abbreviated_word_length for stratification
+        entry['abbreviated_word_length'] = len(entry['abbreviation'].split())
+        
+        # Include expanded form if available (from user decisions)
+        if hasattr(abbr, 'expansion') and abbr.expansion:
+            entry['expansion'] = abbr.expansion
+
+        # Optimize context window size for LLM training
+        optimal_context_size = self.config.get('dataset', 'optimal_context_size', 150)
+        
         # Format context based on configuration
         if self.context_format == 'separate':
-            entry['context_before'] = abbr.context_before
-            entry['context_after'] = abbr.context_after
+            # Trim context to optimal size while preserving the nearest words
+            entry['context_before'] = self._optimize_context(abbr.context_before, optimal_context_size, from_end=True)
+            entry['context_after'] = self._optimize_context(abbr.context_after, optimal_context_size, from_end=False)
         else:
-            entry['context'] = f"{abbr.context_before} {abbr.abbr_text} {abbr.context_after}"
+            # For combined context, preserve more of the immediate surroundings
+            before = self._optimize_context(abbr.context_before, optimal_context_size // 2, from_end=True)
+            after = self._optimize_context(abbr.context_after, optimal_context_size // 2, from_end=False)
+            entry['context'] = f"{before} {abbr.abbr_text} {after}"
         
         # Add source information
         entry['source'] = {
             'file': abbr.file_path,
             'xpath': abbr.xpath,
-            'line': abbr.line_number
+            'xml_tag': abbr.abbr_element.tag.split('}')[-1] if hasattr(abbr, 'abbr_element') else '',
+            'line': getattr(abbr, 'line_number', None)
         }
         
         # Include metadata if configured
         if self.include_metadata:
             entry['metadata'] = abbr.metadata
+            # Include language information for better training
+            if 'language' not in entry['metadata'] and hasattr(self.config, 'get'):
+                entry['metadata']['language'] = self.config.get('settings', 'language', 'eng')
         
         return entry
+        
+    def _optimize_context(self, context: str, max_length: int, from_end: bool = False) -> str:
+        """
+        Optimize context by preserving the most relevant portion for LLM training.
+        
+        Args:
+            context: The context string to optimize
+            max_length: Maximum length of the returned context
+            from_end: If True, preserve the end of the context (nearest to abbreviation)
+            
+        Returns:
+            Optimized context string
+        """
+        if not context or len(context) <= max_length:
+            return context
+            
+        # For context before abbreviation, preserve the end
+        if from_end:
+            # Try to cut at word boundaries
+            words = context.split()
+            result = ""
+            for word in reversed(words):
+                if len(result) + len(word) + 1 <= max_length:
+                    result = word + " " + result
+                else:
+                    break
+            return result.strip()
+        # For context after abbreviation, preserve the beginning
+        else:
+            words = context.split()
+            result = ""
+            for word in words:
+                if len(result) + len(word) + 1 <= max_length:
+                    result += word + " "
+                else:
+                    break
+            return result.strip()
     
     def split_dataset(self, entries: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
@@ -206,11 +267,21 @@ class DatasetBuilder:
         formatted_entries = []
         
         for entry in entries:
+            # Skip entries without expansion field - must have user-verified expansions
+            if 'expansion' not in entry:
+                self.logger.warning(f"Skipping entry without expansion: {entry.get('id', 'unknown')}")
+                continue
+            
             # Create combined context if not already present
             context = entry.get('context', '')
             if not context and ('context_before' in entry and 'context_after' in entry):
                 context = f"{entry['context_before']} {entry['abbreviation']} {entry['context_after']}"
             
+            # Ensure context has adequate length
+            if len(context) < self.min_context_length:
+                self.logger.warning(f"Skipping entry with insufficient context: {entry.get('id', 'unknown')}")
+                continue
+                
             # Format the prompt using the template
             instruction = self.instruction_template.format(
                 abbr=entry['abbreviation'],
@@ -235,15 +306,24 @@ class DatasetBuilder:
                 "content": instruction
             })
             
-            # Add response (this would be filled with actual expansions in real data)
-            # For now, just use the abbreviation as a placeholder
+            # Use the actual user-verified expansion for training
             formatted_entry["messages"].append({
                 "role": "assistant",
-                "content": entry['abbreviation'].replace('$', 'n')  # Simple placeholder
+                "content": entry['expansion']
             })
+            
+            # Add the mapping information for reference
+            formatted_entry["metadata"] = {
+                "abbreviation": entry['abbreviation'],
+                "expansion": entry['expansion'],
+                "confidence": entry.get('source', {}).get('confidence', 1.0),
+                "source_type": entry.get('source', {}).get('source_type', 'user')
+            }
             
             formatted_entries.append(formatted_entry)
         
+        # Log how many entries were suitable for training
+        self.logger.info(f"Created {len(formatted_entries)} training examples out of {len(entries)} dataset entries")
         return formatted_entries
     
     def save_dataset(self, 
@@ -302,6 +382,14 @@ class DatasetBuilder:
             
         valid_entries = []
         seen_ids = set()
+        seen_pairs = set()  # Track abbreviation-expansion pairs to avoid duplicates
+        total_context_length = 0
+        
+        # Reset statistics for source types and languages
+        self.stats['by_source_type'] = {}
+        self.stats['by_language'] = {}
+        self.stats['entries_with_expansion'] = 0
+        self.stats['entries_without_expansion'] = 0
         
         for entry in entries:
             # Check required fields
@@ -318,8 +406,51 @@ class DatasetBuilder:
                     self.stats['duplicate_entries'] += 1
                     continue
                 seen_ids.add(entry_id)
+                
+                # Also check for duplicate abbreviation-expansion pairs
+                if 'expansion' in entry:
+                    pair_key = f"{entry['abbreviation']}|{entry['expansion']}"
+                    if pair_key in seen_pairs:
+                        self.logger.debug(f"Skipping duplicate expansion pair: {pair_key}")
+                        self.stats['duplicate_entries'] += 1
+                        continue
+                    seen_pairs.add(pair_key)
+            
+            # Track context length for statistics
+            context_length = 0
+            if 'context' in entry:
+                context_length = len(entry['context'])
+            elif 'context_before' in entry and 'context_after' in entry:
+                context_length = len(entry['context_before']) + len(entry['context_after'])
+            
+            if context_length > 0:
+                total_context_length += context_length
+            
+            # Track expansions
+            if 'expansion' in entry:
+                self.stats['entries_with_expansion'] += 1
+            else:
+                self.stats['entries_without_expansion'] += 1
+            
+            # Track source types
+            source_type = entry.get('source', {}).get('source_type', 'unknown')
+            if source_type in self.stats['by_source_type']:
+                self.stats['by_source_type'][source_type] += 1
+            else:
+                self.stats['by_source_type'][source_type] = 1
+                
+            # Track languages
+            lang = entry.get('metadata', {}).get('language', 'unknown')
+            if lang in self.stats['by_language']:
+                self.stats['by_language'][lang] += 1
+            else:
+                self.stats['by_language'][lang] = 1
             
             valid_entries.append(entry)
+        
+        # Calculate average context length
+        if valid_entries:
+            self.stats['average_context_length'] = total_context_length / len(valid_entries)
             
         return valid_entries
     

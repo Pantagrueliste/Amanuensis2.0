@@ -85,21 +85,31 @@ class UserInterface:
         # Convert user decisions to dataset format
         dataset_entries = []
         for abbr_text, decision in self.user_decisions.items():
+            # Create a more comprehensive dataset entry with all necessary fields for LLM training
             entry = {
                 'abbreviation': abbr_text,
                 'expansion': decision['expansion'],
+                'normalized_form': decision.get('normalized_form', abbr_text),
                 'context_before': decision.get('context_before', ''),
                 'context_after': decision.get('context_after', ''),
+                'id': f"abbr_{hash(abbr_text + decision.get('file_path', ''))}_{timestamp}",
+                'abbreviated_word_length': len(abbr_text.split()),
+                'expansion_word_length': len(decision['expansion'].split()),
                 'source': {
                     'file': decision.get('file_path', ''),
                     'confidence': decision.get('confidence', 1.0),
-                    'source_type': decision.get('source', 'user')
+                    'source_type': decision.get('source', 'user'),
+                    'xml_tag': decision.get('element_type', '')
                 }
             }
             
             # Include metadata if available
             if 'metadata' in decision and decision['metadata']:
                 entry['metadata'] = decision['metadata']
+                
+            # Add expanded XML form if available
+            if 'expanded_xml' in decision:
+                entry['expanded_xml'] = decision['expanded_xml']
                 
             dataset_entries.append(entry)
         
@@ -110,6 +120,39 @@ class UserInterface:
         
         with open(dataset_file, 'w', encoding='utf-8') as f:
             json.dump(dataset_entries, f, ensure_ascii=False, indent=2)
+        
+        # Create training/validation/test splits for LLM fine-tuning
+        if len(dataset_entries) >= 10:  # Only create splits if we have enough data
+            train_set, val_set, test_set = self.dataset_builder.split_dataset(dataset_entries)
+            
+            # Save the splits
+            train_file = dataset_dir / f"expansion_dataset_{timestamp}_train.json"
+            val_file = dataset_dir / f"expansion_dataset_{timestamp}_validation.json"
+            test_file = dataset_dir / f"expansion_dataset_{timestamp}_test.json"
+            
+            with open(train_file, 'w', encoding='utf-8') as f:
+                json.dump(train_set, f, ensure_ascii=False, indent=2)
+                
+            with open(val_file, 'w', encoding='utf-8') as f:
+                json.dump(val_set, f, ensure_ascii=False, indent=2)
+                
+            with open(test_file, 'w', encoding='utf-8') as f:
+                json.dump(test_set, f, ensure_ascii=False, indent=2)
+                
+            # Create a JSONL file specifically formatted for LLM training
+            system_message = self.config.get('language_model_integration', 'openai', 'system_message', 
+                                "You are a linguist specializing in early modern texts. Your task is to expand abbreviated words based on context.")
+            train_formatted = self.dataset_builder.format_for_llm_training(train_set, system_message)
+            train_formatted_file = dataset_dir / f"expansion_dataset_{timestamp}_train_formatted.jsonl"
+            
+            with open(train_formatted_file, 'w', encoding='utf-8') as f:
+                for entry in train_formatted:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            console.print(f"[green]Created training dataset with {len(train_set)} entries[/green]")
+            console.print(f"[green]Created validation dataset with {len(val_set)} entries[/green]")
+            console.print(f"[green]Created test dataset with {len(test_set)} entries[/green]")
+            console.print(f"[green]Created LLM training file with {len(train_formatted)} formatted examples[/green]")
         
         self.logger.info(f"Saved {len(dataset_entries)} dataset entries to {dataset_file}")
         console.print(f"[green]Saved user decisions to {decisions_file}[/green]")
@@ -460,31 +503,111 @@ class UserInterface:
         """
         Build a dataset from user decisions and/or extracted abbreviations.
         """
-        console.print("[bold]Building Dataset[/bold]")
+        console.print("[bold]Building Dataset for LLM Fine-tuning[/bold]")
         
         if self.user_decisions:
             console.print(f"[green]Using {len(self.user_decisions)} collected abbreviation expansions.[/green]")
             
+            # Ask user for options
+            save_format = Prompt.ask("Output format", choices=["json", "jsonl"], default="json")
+            create_splits = Confirm.ask("Create train/validation/test splits?", default=True)
+            
+            # Convert user decisions to dataset entries
             entries = []
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
             for abbr_text, decision in self.user_decisions.items():
                 entry = {
                     'abbreviation': abbr_text,
                     'expansion': decision['expansion'],
+                    'normalized_form': decision.get('normalized_form', abbr_text),
                     'context_before': decision.get('context_before', ''),
                     'context_after': decision.get('context_after', ''),
+                    'id': f"abbr_{hash(abbr_text + decision.get('file_path', ''))}_{timestamp}",
+                    'abbreviated_word_length': len(abbr_text.split()),
+                    'expansion_word_length': len(decision['expansion'].split()),
                     'source': {
                         'file': decision.get('file_path', ''),
                         'confidence': decision.get('confidence', 1.0),
-                        'source_type': decision.get('source', 'user')
+                        'source_type': decision.get('source', 'user'),
+                        'xml_tag': decision.get('element_type', '')
                     }
                 }
                 
+                # Include metadata if available
                 if 'metadata' in decision and decision['metadata']:
                     entry['metadata'] = decision['metadata']
                     
+                # Add expanded XML form if available
+                if 'expanded_xml' in decision:
+                    entry['expanded_xml'] = decision['expanded_xml']
+                    
                 entries.append(entry)
                 
-            console.print(f"[green]Created {len(entries)} entries from user decisions.[/green]")
+            # Validate entries
+            valid_entries = self.dataset_builder.validate_entries(entries)
+            
+            if not valid_entries:
+                console.print("[yellow]No valid entries found after validation. Check your data.[/yellow]")
+                return
+                
+            # Get output path
+            output_dir = Path(self.config.get("paths", "output_path"))
+            dataset_dir = output_dir / "datasets"
+            dataset_dir.mkdir(exist_ok=True)
+            
+            # Save complete dataset
+            dataset_file = dataset_dir / f"expansion_dataset_{timestamp}.{save_format}"
+            success = self.dataset_builder.save_dataset(valid_entries, dataset_file, save_format)
+            
+            if not success:
+                console.print("[red]Error saving dataset.[/red]")
+                return
+                
+            console.print(f"[green]Created {len(valid_entries)} validated entries from user decisions.[/green]")
+            
+            if create_splits and len(valid_entries) >= 10:
+                # Create and save splits
+                train_set, val_set, test_set = self.dataset_builder.split_dataset(valid_entries)
+                
+                train_file = dataset_dir / f"expansion_dataset_{timestamp}_train.{save_format}"
+                val_file = dataset_dir / f"expansion_dataset_{timestamp}_validation.{save_format}"
+                test_file = dataset_dir / f"expansion_dataset_{timestamp}_test.{save_format}"
+                
+                self.dataset_builder.save_dataset(train_set, train_file, save_format)
+                self.dataset_builder.save_dataset(val_set, val_file, save_format)
+                self.dataset_builder.save_dataset(test_set, test_file, save_format)
+                
+                # Create LLM training format if requested
+                if Confirm.ask("Create formatted file for LLM fine-tuning?", default=True):
+                    system_message = self.config.get('language_model_integration.openai', 'system_message', 
+                                    "You are a linguist specializing in early modern texts. Your task is to expand abbreviated words based on context.")
+                    
+                    train_formatted = self.dataset_builder.format_for_llm_training(train_set, system_message)
+                    train_formatted_file = dataset_dir / f"expansion_dataset_{timestamp}_train_formatted.jsonl"
+                    
+                    with open(train_formatted_file, 'w', encoding='utf-8') as f:
+                        for entry in train_formatted:
+                            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+                    
+                    console.print(f"[green]Created LLM training file with {len(train_formatted)} examples at {train_formatted_file}[/green]")
+                
+                # Show dataset statistics
+                dataset_stats = self.dataset_builder.get_statistics()
+                console.print(f"[green]Created {len(train_set)} training, {len(val_set)} validation, and {len(test_set)} test examples[/green]")
+                
+                # Show distribution information
+                if 'by_source_type' in dataset_stats:
+                    console.print("\n[bold cyan]Source Type Distribution:[/bold cyan]")
+                    for source, count in dataset_stats['by_source_type'].items():
+                        console.print(f"{source}: {count}")
+                        
+                if 'by_language' in dataset_stats:
+                    console.print("\n[bold cyan]Language Distribution:[/bold cyan]")
+                    for lang, count in dataset_stats['by_language'].items():
+                        console.print(f"{lang}: {count}")
+                
+                console.print(f"[green]Successfully created dataset splits ready for LLM fine-tuning at {dataset_dir}[/green]")
         else:
             input_path = self.config.get("paths", "input_path")
             output_path = self.config.get("paths", "output_path")

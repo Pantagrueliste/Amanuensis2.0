@@ -59,16 +59,20 @@ add_xml_ids = true             # Add IDs to new elements for reference
 format = "json"                # Default output format (json or jsonl)
 include_metadata = true        # Include document and abbreviation metadata
 context_format = "separate"    # How to format context (separate or combined)
+optimal_context_size = 150     # Optimal size of context window for LLM training
 
 # Train/validation/test splitting
 train_ratio = 0.8              # Proportion for training set (80%)
 validation_ratio = 0.1         # Proportion for validation set (10%)
 test_ratio = 0.1               # Proportion for test set (10%)
 stratify_by = "abbreviated_word_length"  # Field to stratify by when splitting
+balance_languages = true       # Try to balance languages in the training data
+balance_source_types = true    # Balance between dictionary, pattern, and LLM sources
 
 # LLM training format 
-instruction_template = "Expand the abbreviation: {abbr} in context: {context}"
+instruction_template = "Expand the abbreviation '{abbr}' from the following early modern text with surrounding context: {context}"
 include_system_message = true  # Include system message in training data
+include_xml_format = true      # Include TEI XML formatting examples in training data
 
 [validation]
 # Dataset validation settings
@@ -76,6 +80,7 @@ validate_dataset = true        # Perform validation on the dataset
 minimum_context_length = 20    # Minimum context length required
 check_duplicates = true        # Check for duplicate entries
 consistency_check = true       # Check for consistent expansions
+require_expansion = true       # Skip entries without user-verified expansions
 
 
 #==============================================================================

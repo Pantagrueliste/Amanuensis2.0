@@ -442,7 +442,8 @@ class TEIProcessor:
             if parent is None:
                 self.logger.warning("G element has no parent, cannot determine word context")
                 return "m$"
-            full_text = self._get_element_text_content(parent)
+            
+            # Extract the content before the g element
             text_before_g = ''
             if parent.text:
                 text_before_g += parent.text
@@ -506,9 +507,29 @@ class TEIProcessor:
                         break
                 if child is g_el:
                     found_g = True
-                    
-            # Construct the normalized form with the text before + $ + text after
+            
+            # If text_before_g ends with a letter and g_el represents a macron over that letter,
+            # replace that letter with its macron form in the result
             if text_before_g and text_before_g.strip():
+                last_char = text_before_g.strip()[-1]
+                if last_char.isalpha():
+                    # Replace the last character with the appropriate macron form
+                    macron_map = {
+                        'a': 'ā', 'e': 'ē', 'i': 'ī', 'o': 'ō', 'u': 'ū',
+                        'm': 'm̄', 'n': 'n̄'
+                    }
+                    
+                    if last_char.lower() in macron_map:
+                        # Replace the last character with its macron form
+                        base_text = text_before_g.strip()[:-1]
+                        if last_char.isupper():
+                            macron_char = macron_map[last_char.lower()].upper()
+                        else:
+                            macron_char = macron_map[last_char.lower()]
+                        
+                        return base_text + macron_char + text_after_g.strip()
+                
+                # Default with $ notation if specific macron form not found
                 result = text_before_g.strip() + "$" + text_after_g.strip()
                 return result
             else:

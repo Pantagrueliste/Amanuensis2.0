@@ -554,6 +554,16 @@ class TEIProcessor:
                 prev_text = parent.text
                 if prev_text.strip():
                     base_char = prev_text.strip()[-1]
+                    # Return the actual macron character instead of $ notation
+                    if base_char.isalpha():
+                        macron_map = {
+                            'a': 'ā', 'e': 'ē', 'i': 'ī', 'o': 'ō', 'u': 'ū',
+                            'm': 'm̄', 'n': 'n̄'
+                        }
+                        if base_char.lower() in macron_map:
+                            if base_char.isupper():
+                                return macron_map[base_char.lower()].upper()
+                            return macron_map[base_char.lower()]
                     return f"{base_char}$"
             
             # Fallback if we can't find the base character

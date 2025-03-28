@@ -131,15 +131,15 @@ def main():
                 for abbr in abbreviations:
                     # IMPORTANT: Use only the isolated abbreviation (normalized form)
                     # rather than the full sentence. This ensures that generate_suggestions
-                    # receives "incu$ming" (for example) rather than a longer string.
+                    # receives "incūming" (for example) rather than a longer string.
                     lookup = abbr.normalized_form.strip() if abbr.normalized_form else ""
                     if not lookup:
                         continue
                     
                     suggestions = suggestion_generator.generate_suggestions(
                         abbreviation=lookup,
-                        context_before="",  # Provide context here if available
-                        context_after="",
+                        context_before=abbr.context_before,  # Provide context for better suggestions
+                        context_after=abbr.context_after,
                         metadata=abbr.metadata,
                         normalized_abbr=lookup
                     )

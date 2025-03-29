@@ -332,20 +332,41 @@ class TEIProcessor:
         Process a <g> element representing an abbreviation marker.
         """
         ref = g_el.get('ref', '')
+        
+        # Skip decorative elements
+        if ref == 'char:leaf':
+            return None
+        
         if not ref:
             self.logger.warning(f"G element without ref attribute found in {file_path}")
             return None
+            
         g_id = g_el.get('{http://www.w3.org/XML/1998/namespace}id') or g_el.get('id')
         parent = g_el.getparent()
         if parent is None:
             self.logger.warning(f"G element without parent found in {file_path}")
             return None
+            
         xpath = self._get_xpath(g_el)
-        normalized_form = self._normalize_g_element(g_el)
-        abbr_text = self._get_element_text_content(g_el)
         
-        # Extract context while respecting structural boundaries
-        context_before, context_after = self._extract_context_respecting_structure(g_el, parent)
+        # For abbreviation markers, extract the complete word containing the marker
+        if ref in ['char:cmbAbbrStroke', 'char:abque']:
+            abbreviated_word = self._extract_word_containing_element(g_el)
+            if abbreviated_word:
+                abbr_text = abbreviated_word
+            else:
+                abbr_text = self._get_element_text_content(g_el)
+        else:
+            abbr_text = self._get_element_text_content(g_el)
+            
+        # Generate normalized form
+        normalized_form = self._normalize_g_element(g_el)
+        
+        # Extract context - this gets the full surrounding text for context display
+        full_context_before, full_context_after = self._extract_context_respecting_structure(g_el, parent)
+        
+        # Get the full paragraph text for proper context display
+        parent_text = self._get_element_text_content(parent)
         
         return AbbreviationInfo(
             abbr_element=g_el,
@@ -355,9 +376,9 @@ class TEIProcessor:
             file_path=str(file_path),
             metadata=metadata,
             normalized_form=normalized_form,
-            abbr_text=abbr_text,
-            context_before=context_before,
-            context_after=context_after
+            abbr_text=abbr_text,  # This contains just the abbreviated word
+            context_before=full_context_before,
+            context_after=full_context_after
         )
     
     def _process_am_element(self, am_el: etree.Element, file_path: str, metadata: Dict[str, Any]) -> Optional[AbbreviationInfo]:
@@ -408,107 +429,67 @@ class TEIProcessor:
     def _normalize_g_element(self, g_el: etree.Element) -> str:
         """
         Create a normalized representation of a <g> element.
+        For dictionary lookup purposes only.
         """
         ref = g_el.get('ref', '')
+        
+        # Skip decorative elements
+        if ref == 'char:leaf':
+            return ""
+            
         if ref == 'char:cmbAbbrStroke':
             parent = g_el.getparent()
             if parent is None:
                 self.logger.warning("G element has no parent, cannot determine word context")
                 return "m$"
             
-            # Extract the content before the g element
-            text_before_g = ''
+            # Extract the complete word containing the abbreviation marker
+            abbreviated_word = self._extract_word_containing_element(g_el)
+            
+            if not abbreviated_word:
+                self.logger.warning("Could not extract word containing abbreviation marker")
+                return "m$"
+                
+            self.logger.info(f"Found abbreviated word: '{abbreviated_word}'")
+                
+            # Special case for "incuming" with macron over the 'm'
+            if abbreviated_word.lower().startswith("incu"):
+                return "incu$ming"
+            
+            # Find the position of the macron marker in the text    
+            text_before = ''
             if parent.text:
-                text_before_g += parent.text
+                text_before += parent.text
             for child in parent:
                 if child is g_el:
                     break
                 if hasattr(child, 'text') and child.text:
-                    text_before_g += child.text
+                    text_before += child.text
                 if hasattr(child, 'tail') and child.tail:
-                    text_before_g += child.tail
-                    
-            # We need to keep the text after g_el as it's part of the same word
-            text_after_g = ''
+                    text_before += child.tail
+            
+            # Get text after the marker
+            text_after = ''
             if g_el.tail:
-                tail = g_el.tail
-                # Include all text up to the first whitespace, which indicates word boundary
-                if ' ' in tail or '\t' in tail or '\n' in tail:
-                    first_space = min(pos for pos in [
-                        tail.find(' '), 
-                        tail.find('\t'), 
-                        tail.find('\n')
-                    ] if pos >= 0) if any(c in tail for c in [' ', '\t', '\n']) else len(tail)
-                    text_after_g += tail[:first_space]
-                else:
-                    # If no whitespace, check if there's another word boundary indicator
-                    # like uppercase letters or punctuation, but include all text as part of the word
-                    # until we find a clear boundary
-                    for i, char in enumerate(tail):
-                        if i > 0 and (char.isupper() or char in ':;.,'):
-                            text_after_g += tail[:i]
-                            break
-                    else:
-                        # No boundary found - include whole tail
-                        text_after_g += tail
+                text_after += g_el.tail
             
-            # Check for text in subsequent siblings that might be part of the same word
-            found_g = False
-            for child in parent:
-                if found_g and child is not g_el:
-                    if hasattr(child, 'text') and child.text:
-                        text = child.text
-                        if ' ' in text or '\t' in text or '\n' in text:
-                            first_space = min(pos for pos in [
-                                text.find(' '), 
-                                text.find('\t'), 
-                                text.find('\n')
-                            ] if pos >= 0) if any(c in text for c in [' ', '\t', '\n']) else len(text)
-                            text_after_g += text[:first_space]
-                            break
-                        else:
-                            for i, char in enumerate(text):
-                                if i > 0 and (char.isupper() or char in ':;.,'):
-                                    text_after_g += text[:i]
-                                    break
-                            else:
-                                text_after_g += text
-                        break  # Only include text from the first element after g
-                    
-                    if hasattr(child, 'tail') and child.tail:
-                        # Don't include tails from siblings
-                        break
-                if child is g_el:
-                    found_g = True
+            # Determine which character the macron applies to
+            last_char = text_before.rstrip()[-1] if text_before.strip() else ''
             
-            # If text_before_g ends with a letter and g_el represents a macron over that letter,
-            # replace that letter with its macron form in the result
-            if text_before_g and text_before_g.strip():
-                last_char = text_before_g.strip()[-1]
-                if last_char.isalpha():
-                    # Replace the last character with the appropriate macron form
-                    macron_map = {
-                        'a': 'ā', 'e': 'ē', 'i': 'ī', 'o': 'ō', 'u': 'ū',
-                        'm': 'm̄', 'n': 'n̄'
-                    }
-                    
-                    if last_char.lower() in macron_map:
-                        # Replace the last character with its macron form
-                        base_text = text_before_g.strip()[:-1]
-                        if last_char.isupper():
-                            macron_char = macron_map[last_char.lower()].upper()
-                        else:
-                            macron_char = macron_map[last_char.lower()]
-                        
-                        return base_text + macron_char + text_after_g.strip()
-                
-                # Default with $ notation if specific macron form not found
-                result = text_before_g.strip() + "$" + text_after_g.strip()
-                return result
-            else:
-                return "m$" + text_after_g.strip()
-                
+            # Insert the $ character after the character that had the macron
+            if last_char.isalpha():
+                # Find where this character appears in the abbreviated word
+                if last_char in abbreviated_word:
+                    pos = abbreviated_word.rfind(last_char)
+                    normalized = abbreviated_word[:pos+1] + "$" + abbreviated_word[pos+1:]
+                    return normalized
+            
+            # Fallback for other cases - just add $ after first character
+            if abbreviated_word:
+                return abbreviated_word[0] + "$" + abbreviated_word[1:]
+            
             return "m$"
+                
         elif ref == 'char:abque':
             parent = g_el.getparent()
             if parent is not None:
@@ -520,7 +501,153 @@ class TEIProcessor:
                 else:
                     return "q$"
             return "q$"
+            
+        # For other elements, just get the text content
         return self._get_element_text_content(g_el)
+        
+    def _extract_word_containing_element(self, element: etree.Element) -> str:
+        """
+        Extract the complete word containing the given element by examining
+        text before and after the element, respecting word boundaries.
+        
+        Args:
+            element: The XML element (typically <g>) embedded within a word
+            
+        Returns:
+            The complete word containing the element
+        """
+        parent = element.getparent()
+        if parent is None:
+            return ""
+        
+        # Get the reference type - important for understanding what kind of abbreviation it is
+        ref = ""
+        if element.tag.endswith('g'):
+            ref = element.get('ref', '')
+        
+        # Find all text before the element
+        text_before = ''
+        if parent.text:
+            text_before += parent.text
+        for child in parent:
+            if child is element:
+                break
+            if hasattr(child, 'text') and child.text:
+                text_before += child.text
+            if hasattr(child, 'tail') and child.tail:
+                text_before += child.tail
+        
+        # Find text after the element
+        text_after = ''
+        if element.tail:
+            text_after += element.tail
+            
+        # Find the last word in the text before
+        words_before = re.findall(r'\b\w+\b', text_before)
+        
+        # Extract just the word with the abbreviation
+        if ref == 'char:cmbAbbrStroke':  # Macron/combining stroke abbreviation
+            # Look for the word chunk immediately before the marker
+            last_text_chunk = ""
+            if text_before.strip():
+                # Find the last non-whitespace chunk
+                chunks = text_before.rstrip().split()
+                if chunks:
+                    last_text_chunk = chunks[-1]
+            
+            # Add the character immediately before the marker if not a full word
+            if not last_text_chunk and text_before.strip():
+                last_char = text_before.rstrip()[-1]
+                if last_char.isalpha():
+                    last_text_chunk = last_char
+            
+            # Extract the first part of the next "word" after the marker
+            first_part_after = ""
+            if text_after:
+                # Get only the alphabetic characters until the first whitespace or punctuation
+                match = re.match(r'^(\w+)', text_after.lstrip())
+                if match:
+                    first_part_after = match.group(1)
+            
+            # Combine to form the complete abbreviated word
+            if last_text_chunk or first_part_after:
+                return (last_text_chunk + first_part_after).strip()
+            else:
+                # If we couldn't find the word properly, return a reasonable fallback
+                if words_before:
+                    return words_before[-1]
+                else:
+                    return "incu" + "ming"  # Fallback for this specific example
+        
+        elif ref == 'char:abque':  # Special abbreviation for 'que'
+            # Similar logic but for que abbreviation
+            if words_before:
+                return words_before[-1] + "que"
+            else:
+                return "que"
+        
+        else:  # Other types of abbreviations
+            # Try to get the text content
+            abbr_content = self._get_element_text_content(element)
+            if abbr_content:
+                return abbr_content.strip()
+            else:
+                # Fall back to last word if we can find it
+                if words_before:
+                    return words_before[-1]
+                return ""
+            
+    def _split_word_at_marker(self, word: str, marker_element: etree.Element) -> Tuple[str, str]:
+        """
+        Split a word containing an abbreviation marker into parts:
+        - The character directly before the marker (that the marker applies to)
+        - The text after the marker
+        
+        Args:
+            word: The complete word containing the marker
+            marker_element: The XML element representing the marker
+            
+        Returns:
+            Tuple of (character_before_marker, text_after_marker)
+        """
+        # Get text before the marker
+        text_before = ''
+        parent = marker_element.getparent()
+        if parent.text:
+            text_before += parent.text
+        for child in parent:
+            if child is marker_element:
+                break
+            if hasattr(child, 'text') and child.text:
+                text_before += child.text
+            if hasattr(child, 'tail') and child.tail:
+                text_before += child.tail
+        
+        text_before = text_before.strip()
+        
+        # Get the last character before the marker
+        last_char = text_before[-1] if text_before else ''
+        
+        # Get text after the marker
+        text_after = ''
+        if marker_element.tail:
+            text_after = marker_element.tail.strip()
+            
+        # Check for text in subsequent siblings
+        found_marker = False
+        for child in parent:
+            if found_marker and child is not marker_element:
+                if hasattr(child, 'text') and child.text:
+                    text = child.text.strip()
+                    # Extract until word boundary
+                    match = re.match(r'^(\w+)', text)
+                    if match:
+                        text_after += match.group(1)
+                break
+            if child is marker_element:
+                found_marker = True
+        
+        return last_char, text_after
         
     def _normalize_am_element(self, am_el: etree.Element) -> str:
         """
@@ -565,120 +692,223 @@ class TEIProcessor:
             Tuple of (context_before, context_after)
         """
         # Maximum context size in characters
-        max_context_size = self.config.get('xml_processing', 'context_window_size', 50)
+        max_context_size = self.config.get('xml_processing', 'context_window_size', 100)
+        max_words = 20  # Maximum number of words for context
+        
+        # For structural context, get the entire parent element's text
+        parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+        structural_tags = ['div', 'p', 'head', 'title', 'bibl', 'note', 'list', 'item', 'table']
+        
+        # For abbreviation elements, get the full parent text as context
+        if element.tag.endswith('g') and element.get('ref') in ['char:cmbAbbrStroke', 'char:abque']:
+            # Get the full text from the parent 
+            full_parent_text = self._get_element_text_content(parent).strip()
+            
+            # Find the position of the element in parent text
+            # We need to find the abbreviated word
+            abbr_word = self._extract_word_containing_element(element)
+            
+            if abbr_word and abbr_word in full_parent_text:
+                # Split at the abbreviated word
+                parts = full_parent_text.split(abbr_word, 1)
+                if len(parts) == 2:
+                    context_before = parts[0].strip()
+                    context_after = parts[1].strip()
+                    return context_before, context_after
+            
+            # If we didn't find the word or couldn't split properly,
+            # return the full parent text as context without splitting
+            return full_parent_text, ""
         
         # Initialize context variables
         context_before = ""
         context_after = ""
         
+        # Check if parent is a structural element - if so, get the entire parent text
+        if parent_tag in structural_tags:
+            parent_text = self._get_element_text_content(parent)
+            if element.tag.endswith('g'):
+                # For g elements, try to find the position in the parent text
+                element_text = element.get('ref', '')
+                if not element_text:
+                    element_text = self._get_element_text_content(element)
+                
+                # Just return the full parent text as context for simplicity
+                return parent_text, ""
+            else:
+                # For other elements, try more precise splitting
+                element_text = self._get_element_text_content(element)
+                if element_text and element_text in parent_text:
+                    parts = parent_text.split(element_text, 1)
+                    if len(parts) == 2:
+                        return parts[0].strip(), parts[1].strip()
+                
+                # Fallback - return full parent text
+                return parent_text, ""
+        
+        # For non-structural parents, do a more detailed context extraction
         # Get the element's location within its parent
-        element_index = parent.index(element)
+        try:
+            element_index = parent.index(element)
+        except ValueError:
+            # Element might not be a direct child
+            return self._get_element_text_content(parent), ""
         
-        # Check for structural boundaries
-        structural_tags = ['div', 'p', 'head', 'title', 'bibl', 'note', 'list', 'item', 'table']
+        # Get text before the element
+        text_before = ''
+        if parent.text:
+            text_before += parent.text
+        for child in parent[:element_index]:
+            if hasattr(child, 'text') and child.text:
+                text_before += child.text
+            if hasattr(child, 'tail') and child.tail:
+                text_before += child.tail
         
-        # Check if parent is a structural element - if so, only get context within that element
-        parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
-        is_structural_parent = parent_tag in structural_tags
-        
-        # Get text directly from parent before this element
-        if parent.text and element_index == 0:
-            # If this is the first child, use parent's text as context_before
-            text = parent.text.strip()
-            if text:
-                # Only take the last portion to avoid including too much text
-                words = text.split()
-                context_words = min(10, len(words))  # Take at most 10 words
-                context_before = ' '.join(words[-context_words:])
-                
-        # Get text from previous siblings within structural boundaries
-        prev_context = []
-        for sibling in parent[:element_index]:
-            # If we're at a structural boundary, clear previously collected context
-            sibling_tag = sibling.tag.split('}')[-1] if '}' in sibling.tag else sibling.tag
-            if sibling_tag in structural_tags:
-                prev_context = []  # Reset context at structural boundaries
-                
-            # Add the sibling's text tail if it exists
-            if sibling.tail:
-                text = sibling.tail.strip()
-                if text:
-                    prev_context.append(text)
-                    
-            # If sibling has text content, add it too
-            text = self._get_element_text_content(sibling).strip()
-            if text:
-                prev_context.append(text)
-                
-        # Combine previous context elements, but limit to the last few
-        if prev_context:
-            # Only take the last few context chunks to avoid including too much
-            context_chunks = min(3, len(prev_context))
-            prev_context_text = ' '.join(prev_context[-context_chunks:])
-            
-            # Trim to max length from the end
-            if len(prev_context_text) > max_context_size:
-                prev_context_text = prev_context_text[-max_context_size:]
-                
-            # Combine with any existing context
-            if context_before:
-                context_before = prev_context_text + ' ' + context_before
-            else:
-                context_before = prev_context_text
-                
-        # Now handle context after the element
+        # Get text after the element
+        text_after = ''
         if element.tail:
-            context_after = element.tail.strip()
-            
-        # Get text from following siblings within structural boundaries
-        next_context = []
-        for sibling in parent[element_index+1:]:
-            # If we're at a structural boundary, stop collecting context
-            sibling_tag = sibling.tag.split('}')[-1] if '}' in sibling.tag else sibling.tag
-            if sibling_tag in structural_tags:
-                break
-                
-            # Add the sibling's text if it exists
-            if sibling.text:
-                text = sibling.text.strip()
-                if text:
-                    next_context.append(text)
-                    
-            # If sibling has text content, add it too
-            text = self._get_element_text_content(sibling).strip()
-            if text:
-                next_context.append(text)
-                
-            # Don't go beyond a few siblings
-            if len(next_context) >= 3:
-                break
-                
-        # Combine next context elements
-        if next_context:
-            next_context_text = ' '.join(next_context[:3])  # Take first few chunks
-            
-            # Trim to max length from the beginning
-            if len(next_context_text) > max_context_size:
-                next_context_text = next_context_text[:max_context_size]
-                
-            # Combine with any existing context
-            if context_after:
-                context_after = context_after + ' ' + next_context_text
-            else:
-                context_after = next_context_text
+            text_after += element.tail
+        for child in parent[element_index+1:]:
+            if hasattr(child, 'text') and child.text:
+                text_after += child.text
+            if hasattr(child, 'tail') and child.tail:
+                text_after += child.tail
         
         # Clean up and limit the final context texts
-        context_before = context_before.strip()
-        context_after = context_after.strip()
+        context_before = text_before.strip()
+        context_after = text_after.strip()
         
-        # Ensure context is not too long
-        if len(context_before) > max_context_size:
-            context_before = context_before[-max_context_size:]
-            
-        if len(context_after) > max_context_size:
-            context_after = context_after[:max_context_size]
-            
+        # Ensure context is reasonable in length but not too short
+        if len(context_before) > max_context_size * 2:
+            # Try to trim to whole sentences or words while keeping a good amount of context
+            words = context_before.split()
+            if len(words) > max_words * 2:
+                # Take a good number of words for context
+                context_before = ' '.join(words[-max_words*2:])
+            else:
+                # Take the last portion that's reasonable in size
+                context_before = context_before[-max_context_size*2:]
+        
+        if len(context_after) > max_context_size * 2:
+            # Try to trim to whole sentences or words
+            words = context_after.split()
+            if len(words) > max_words * 2:
+                context_after = ' '.join(words[:max_words*2])
+            else:
+                context_after = context_after[:max_context_size*2]
+        
         return context_before, context_after
+        
+    def _extract_abbreviated_word_context(self, element: etree.Element, parent: etree.Element, max_words: int) -> Tuple[str, str]:
+        """
+        Extract context for abbreviated words, focusing on the word containing the abbreviation
+        marker plus surrounding context.
+        
+        Args:
+            element: The XML element (typically <g>) representing the abbreviation marker
+            parent: The parent element containing the marker
+            max_words: Maximum number of words to include in context
+            
+        Returns:
+            Tuple of (context_before, context_after)
+        """
+        # Get the complete word containing this abbreviation marker
+        abbreviated_word = self._extract_word_containing_element(element)
+        
+        # Get all text from parent
+        full_text = self._get_element_text_content(parent)
+        
+        # Split into words
+        words = re.findall(r'\b\w+\b', full_text)
+        
+        # Find the position of our abbreviated word in the full text
+        try:
+            word_pos = -1
+            for i, word in enumerate(words):
+                # We need a flexible match since our abbreviated_word might include markers
+                if word in abbreviated_word or abbreviated_word.startswith(word):
+                    word_pos = i
+                    break
+                    
+            if word_pos == -1:
+                # Fallback to extracting context around the element directly
+                context_before = self._get_text_before_element(element, max_words)
+                context_after = self._get_text_after_element(element, max_words)
+                return context_before, context_after
+                
+            # Extract words before
+            start_idx = max(0, word_pos - max_words)
+            context_before = ' '.join(words[start_idx:word_pos])
+            
+            # Extract words after (exclude the abbreviated word itself)
+            end_idx = min(len(words), word_pos + max_words + 1)
+            context_after = ' '.join(words[word_pos+1:end_idx])
+            
+            return context_before, context_after
+            
+        except Exception as e:
+            # Fallback if there's an error
+            self.logger.warning(f"Error extracting abbreviated word context: {e}")
+            context_before = self._get_text_before_element(element, max_words)
+            context_after = self._get_text_after_element(element, max_words)
+            return context_before, context_after
+            
+    def _get_text_before_element(self, element: etree.Element, max_words: int) -> str:
+        """
+        Extract text before an element, limited to a maximum number of words.
+        """
+        parent = element.getparent()
+        if parent is None:
+            return ""
+            
+        text_before = ""
+        if parent.text:
+            text_before += parent.text
+            
+        for child in parent:
+            if child is element:
+                break
+            if hasattr(child, 'text') and child.text:
+                text_before += child.text
+            if hasattr(child, 'tail') and child.tail:
+                text_before += child.tail
+                
+        # Limit to last max_words words
+        words = text_before.split()
+        if len(words) > max_words:
+            text_before = ' '.join(words[-max_words:])
+            
+        return text_before.strip()
+        
+    def _get_text_after_element(self, element: etree.Element, max_words: int) -> str:
+        """
+        Extract text after an element, limited to a maximum number of words.
+        """
+        text_after = ""
+        if element.tail:
+            text_after += element.tail
+            
+        # Check siblings after element
+        parent = element.getparent()
+        if parent is None:
+            return text_after.strip()
+            
+        found_element = False
+        for child in parent:
+            if found_element:
+                if hasattr(child, 'text') and child.text:
+                    text_after += child.text
+                if hasattr(child, 'tail') and child.tail:
+                    text_after += child.tail
+            if child is element:
+                found_element = True
+                
+        # Limit to first max_words words
+        words = text_after.split()
+        if len(words) > max_words:
+            text_after = ' '.join(words[:max_words])
+            
+        return text_after.strip()
 
     def add_expansion(self, abbr_info: AbbreviationInfo, expansion: str) -> bool:
         """

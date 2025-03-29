@@ -561,6 +561,11 @@ class TEIProcessor:
                 if last_char.isalpha():
                     last_text_chunk = last_char
             
+            # Check if text after starts with whitespace
+            if text_after and text_after.lstrip() != text_after:
+                # There's whitespace immediately after the g element - don't include the next word
+                return last_text_chunk
+                
             # Extract the first part of the next "word" after the marker
             first_part_after = ""
             if text_after:

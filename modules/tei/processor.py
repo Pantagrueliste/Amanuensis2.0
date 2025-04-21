@@ -203,6 +203,55 @@ class TEIProcessor:
             self.logger.error(f"Error extracting metadata: {e}")
         
         return metadata
+        
+    def get_document_language(self, root: etree.Element) -> str:
+        """
+        Extract the language from a TEI document.
+        Checks multiple locations:
+        1. <langUsage><language ident="..."> in the teiHeader
+        2. <text xml:lang="..."> attribute
+        3. Other common language indicators
+        
+        Args:
+            root: The root element of the TEI document
+            
+        Returns:
+            The language identifier (e.g., 'lat', 'eng') or empty string if not found
+        """
+        try:
+            # Method 1: Check <langUsage><language ident="..."> in teiHeader
+            language_elements = root.xpath('//tei:profileDesc/tei:langUsage/tei:language', 
+                                          namespaces=self.namespaces)
+            if language_elements:
+                lang = language_elements[0].get('ident', '')
+                if lang:
+                    return lang
+            
+            # Method 2: Check <text xml:lang="..."> attribute
+            text_elements = root.xpath('//tei:text', namespaces=self.namespaces)
+            if text_elements:
+                for text_el in text_elements:
+                    lang = text_el.get('{http://www.w3.org/XML/1998/namespace}lang', '')
+                    if lang:
+                        return lang
+            
+            # Method 3: Check <body xml:lang="..."> attribute (sometimes used)
+            body_elements = root.xpath('//tei:body', namespaces=self.namespaces)
+            if body_elements:
+                for body_el in body_elements:
+                    lang = body_el.get('{http://www.w3.org/XML/1998/namespace}lang', '')
+                    if lang:
+                        return lang
+                        
+            # Method 4: Check root TEI element for xml:lang
+            lang = root.get('{http://www.w3.org/XML/1998/namespace}lang', '')
+            if lang:
+                return lang
+                
+        except Exception as e:
+            self.logger.error(f"Error extracting language: {e}")
+        
+        return ""
     
     def _get_element_text_content(self, element: etree.Element) -> str:
         """

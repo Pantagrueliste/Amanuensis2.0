@@ -106,6 +106,24 @@ class TEIProcessor:
             # Extract metadata from TEI header for context
             metadata = self._extract_metadata(root)
             
+            # Check if document language matches target language
+            doc_language = self._extract_metadata(root).get('language', '')
+            
+            # Try the TEI processor's more thorough language detection if metadata doesn't have language
+            if not doc_language:
+                try:
+                    from tei.processor import TEIProcessor
+                    temp_processor = TEIProcessor(self.config)
+                    doc_language = temp_processor.get_document_language(root)
+                except (ImportError, AttributeError) as e:
+                    self.logger.warning(f"Could not use TEI processor for language detection: {e}")
+            
+            target_language = self.config.get('settings', 'language', 'eng')
+            
+            if doc_language and doc_language != target_language:
+                self.logger.warning(f"Document language '{doc_language}' does not match target language '{target_language}'. Skipping file.")
+                return [], None
+            
             # Find all abbreviation elements using XPath
             abbreviations = []
             

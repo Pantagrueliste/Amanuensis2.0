@@ -279,9 +279,15 @@ class UserInterface:
         
         if use_interactive:
             # No continuous progress bar; just process each file and show a summary line
-            for i, file_path in enumerate(selected_files, 1):
+            i = 1
+            while i <= len(selected_files):
+                file_path = selected_files[i-1]
                 console.print(f"[bold magenta]\nProcessing file {i}/{len(selected_files)}:[/bold magenta] {file_path}")
+                
+                # Process the file - asking about discarding is now handled per abbreviation
                 self._process_single_tei_file(file_path, output_path)
+                
+                i += 1
             console.print(f"[bold green]Finished interactive expansion for {len(selected_files)} files.[/bold green]")
         else:
             # Use Rich Progress bar for non-interactive mode
@@ -303,6 +309,10 @@ class UserInterface:
         then performing interactive or automatic expansions.
         """
         try:
+            # Track file-specific decisions separately
+            file_decisions = {}
+            discard_file = False
+            
             # Extract abbreviations
             abbreviations, tree = self.tei_processor.parse_document(file_path)
             
@@ -318,9 +328,41 @@ class UserInterface:
             # Decide if expansions are interactive or automatic
             use_interactive = self.config.get("user_interface", "interactive_mode", True)
             if use_interactive:
-                expanded_count = self._interactive_expansion(abbreviations, tree)
+                expanded_count, file_decisions, discard_file = self._interactive_expansion(abbreviations, tree, file_path)
             else:
                 expanded_count = self._automatic_expansion(abbreviations, tree)
+            
+            # Handle document discard decision if applicable
+            if discard_file:
+                discarded_dir = self.config.get("paths", "discarded_directory", 
+                                               os.path.join(output_dir, "discarded"))
+                os.makedirs(discarded_dir, exist_ok=True)
+                dest_path = os.path.join(discarded_dir, os.path.basename(file_path))
+                
+                keep_decisions = Confirm.ask(
+                    "Do you want to include the decisions made so far in the training dataset?", 
+                    default=False
+                )
+                
+                if not keep_decisions:
+                    # Remove any collected decisions for this file
+                    keys_to_remove = []
+                    for key, decision in self.user_decisions.items():
+                        if decision.get('file_path') == file_path:
+                            keys_to_remove.append(key)
+                    
+                    for key in keys_to_remove:
+                        del self.user_decisions[key]
+                    
+                    console.print(f"[yellow]Removed {len(keys_to_remove)} decisions for this file.[/yellow]")
+                else:
+                    console.print("[green]Keeping decisions for training dataset.[/green]")
+                
+                # Copy file to discarded directory
+                import shutil
+                shutil.copy2(file_path, dest_path)
+                console.print(f"[bold]Moved {rel_path} to discarded directory[/bold]")
+                return
             
             self.files_processed += 1
             self.abbreviations_expanded += expanded_count
@@ -387,18 +429,21 @@ class UserInterface:
         """
         return text
     
-    def _interactive_expansion(self, abbreviations: List[AbbreviationInfo], tree) -> int:
+    def _interactive_expansion(self, abbreviations: List[AbbreviationInfo], tree, file_path: str) -> tuple:
         """
         Interactively expand abbreviations with user input.
         
         Args:
             abbreviations: List of abbreviation information objects
             tree: XML tree object
+            file_path: Path to the file being processed
             
         Returns:
-            Number of abbreviations expanded
+            Tuple containing (Number of abbreviations expanded, file decisions dict, discard flag)
         """
         expanded_count = 0
+        file_decisions = {}
+        discard_file = False
 
         for i, abbr in enumerate(abbreviations, 1):
             element_tag = abbr.abbr_element.tag.split('}')[-1] if '}' in abbr.abbr_element.tag else abbr.abbr_element.tag
@@ -467,18 +512,26 @@ class UserInterface:
                     sugg['source']
                 )
             
-            # Always add options for custom expansion and skipping
+            # Add options for custom expansion, skipping, and discarding document
             table.add_row("c", "Custom expansion", "-", "-")
             table.add_row("s", "Skip this abbreviation", "-", "-")
+            table.add_row("d", "Discard this document", "-", "-")
             
             console.print(table)
             
             try:
-                choice = Prompt.ask("Select an option", choices=[str(i) for i in range(1, len(suggestions)+1)] + ["c", "s"])
+                choices = [str(i) for i in range(1, len(suggestions)+1)] + ["c", "s", "d"]
+                choice = Prompt.ask("Select an option", choices=choices)
                 console.print(f"[bold]You selected:[/bold] {choice}")
             except EOFError:
                 console.print("[yellow]Input interrupted. Skipping this abbreviation.[/yellow]")
                 continue
+            
+            # Handle discard document option
+            if choice.lower() == "d":
+                console.print("[yellow]Discarding this document.[/yellow]")
+                discard_file = True
+                break
                 
             if choice.lower() == "s":
                 console.print("Skipping this abbreviation.")
@@ -519,21 +572,24 @@ class UserInterface:
             if not abbr_key:
                 abbr_key = f"unknown_{len(self.user_decisions)}"
             
-            self.user_decisions[abbr_key] = {
+            decision = {
                 'expansion': expansion,
                 'context_before': abbr.context_before,
                 'context_after': abbr.context_after,
                 'abbreviation': abbr.abbr_text,
                 'source': source,
                 'confidence': confidence,
-                'file_path': abbr.file_path,
+                'file_path': file_path,
                 'metadata': abbr.metadata
             }
+            
+            self.user_decisions[abbr_key] = decision
+            file_decisions[abbr_key] = decision
             
             expanded_count += 1
             console.print(f"[green]Recorded expansion: {expansion}[/green]")
         
-        return expanded_count
+        return expanded_count, file_decisions, discard_file
     
     def build_dataset(self):
         """

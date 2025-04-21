@@ -58,7 +58,8 @@ class DatasetBuilder:
             'validation_entries': 0,
             'test_entries': 0,
             'skipped_entries': 0,
-            'duplicate_entries': 0
+            'duplicate_entries': 0,
+            'tei_xml_entries': 0
         }
     
     def process_abbreviations(self, abbreviations: List[AbbreviationInfo]) -> List[Dict[str, Any]]:
@@ -79,6 +80,116 @@ class DatasetBuilder:
                 dataset_entries.append(entry)
         
         self.stats['total_entries'] += len(dataset_entries)
+        return dataset_entries
+        
+    def process_abbreviations_tei(self, abbreviations: List[AbbreviationInfo]) -> List[Dict[str, Any]]:
+        """
+        Process a list of abbreviations into dataset entries with TEI XML fragments.
+        Captures the original XML and the expanded XML for each abbreviation.
+        
+        Args:
+            abbreviations: List of abbreviation info objects
+            
+        Returns:
+            List of formatted dataset entries with XML fragments
+        """
+        dataset_entries = []
+        
+        for abbr in abbreviations:
+            # Skip invalid abbreviations
+            if self.validate_dataset and (
+                len(abbr.context_before) < self.min_context_length and 
+                len(abbr.context_after) < self.min_context_length
+            ):
+                self.logger.warning(f"Skipping abbreviation '{abbr.abbr_text}' due to insufficient context")
+                self.stats['skipped_entries'] += 1
+                continue
+                
+            # Create a copy of the original element and its parent for manipulation
+            from lxml import etree
+            import copy
+            
+            # Capture original XML as string
+            original_parent = abbr.parent_element
+            original_xml = etree.tostring(original_parent, encoding='unicode', pretty_print=True)
+            
+            # Create a deep copy of the element for expansion
+            parent_copy = copy.deepcopy(original_parent)
+            # Find the corresponding abbreviation element in the copied parent
+            abbr_copy = None
+            for child in parent_copy.iter():
+                if child.tag == abbr.abbr_element.tag:
+                    # Compare attributes to find the right element
+                    matches = True
+                    for key, value in abbr.abbr_element.items():
+                        if child.get(key) != value:
+                            matches = False
+                            break
+                    if matches:
+                        abbr_copy = child
+                        break
+            
+            if abbr_copy is None:
+                self.logger.warning(f"Could not locate abbreviation element in copied parent")
+                continue
+                
+            # Create a new AbbreviationInfo with the copied elements
+            from ..tei.processor import AbbreviationInfo
+            abbr_info_copy = AbbreviationInfo(
+                abbr_element=abbr_copy,
+                abbr_id=abbr.abbr_id,
+                parent_element=parent_copy,
+                xpath=abbr.xpath,
+                file_path=abbr.file_path,
+                metadata=abbr.metadata,
+                normalized_form=abbr.normalized_form,
+                abbr_text=abbr.abbr_text,
+                context_before=abbr.context_before,
+                context_after=abbr.context_after
+            )
+            
+            # Create a TEIProcessor to use its add_expansion method
+            from ..tei.processor import TEIProcessor
+            tei_processor = TEIProcessor(self.config)
+            
+            # Apply the expansion to the copied XML
+            expansion = abbr.expansion if hasattr(abbr, 'expansion') else abbr.abbr_text
+            tei_processor.add_expansion(abbr_info_copy, expansion)
+            
+            # Capture expanded XML as string
+            expanded_xml = etree.tostring(parent_copy, encoding='unicode', pretty_print=True)
+            
+            # Create the dataset entry
+            entry = {
+                'abbreviation': abbr.abbr_text,
+                'expansion': expansion,
+                'original_xml': original_xml,
+                'expanded_xml': expanded_xml,
+                'xpath': abbr.xpath,
+                'id': abbr.abbr_id or f"abbr_{hash(abbr.abbr_text + abbr.file_path)}"
+            }
+            
+            # Format context based on configuration
+            if self.context_format == 'separate':
+                entry['context_before'] = abbr.context_before
+                entry['context_after'] = abbr.context_after
+            else:
+                entry['context'] = f"{abbr.context_before} {abbr.abbr_text} {abbr.context_after}"
+            
+            # Add source information
+            entry['source'] = {
+                'file': abbr.file_path,
+                'xpath': abbr.xpath,
+                'line': getattr(abbr, 'line_number', None)
+            }
+            
+            # Include metadata if configured
+            if self.include_metadata:
+                entry['metadata'] = abbr.metadata
+                
+            dataset_entries.append(entry)
+        
+        self.stats['tei_xml_entries'] += len(dataset_entries)
         return dataset_entries
     
     def _create_entry(self, abbr: AbbreviationInfo) -> Optional[Dict[str, Any]]:
@@ -256,7 +367,7 @@ class DatasetBuilder:
         Args:
             entries: List of dataset entries
             output_path: Path to save the dataset
-            format: Output format (json or jsonl, defaults to configured value)
+            format: Output format (json, jsonl, or tei_xml, defaults to configured value)
             
         Returns:
             True if successful, False otherwise
@@ -275,6 +386,37 @@ class DatasetBuilder:
                 with open(output_path, 'w', encoding='utf-8') as f:
                     for entry in entries:
                         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            elif format.lower() == 'tei_xml':
+                # For TEI XML format, create a specialized output
+                # Each entry will be saved as a pair of XML fragments
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    f.write('<tei_abbreviation_dataset>\n')
+                    
+                    for entry in entries:
+                        if 'original_xml' in entry and 'expanded_xml' in entry:
+                            f.write('  <entry>\n')
+                            f.write(f'    <id>{entry["id"]}</id>\n')
+                            f.write(f'    <abbreviation>{entry["abbreviation"]}</abbreviation>\n')
+                            f.write(f'    <expansion>{entry["expansion"]}</expansion>\n')
+                            f.write('    <original_xml><![CDATA[')
+                            f.write(entry['original_xml'])
+                            f.write(']]></original_xml>\n')
+                            f.write('    <expanded_xml><![CDATA[')
+                            f.write(entry['expanded_xml'])
+                            f.write(']]></expanded_xml>\n')
+                            
+                            # Add metadata if present
+                            if 'metadata' in entry and entry['metadata']:
+                                f.write('    <metadata>\n')
+                                for key, value in entry['metadata'].items():
+                                    if value:  # Only write non-empty metadata
+                                        f.write(f'      <{key}>{value}</{key}>\n')
+                                f.write('    </metadata>\n')
+                                
+                            f.write('  </entry>\n')
+                    
+                    f.write('</tei_abbreviation_dataset>')
             else:
                 # Default to JSON
                 with open(output_path, 'w', encoding='utf-8') as f:

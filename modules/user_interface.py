@@ -153,6 +153,16 @@ class UserInterface:
         for option in options:
             console.print(f"  {option}")
         
+        # Show active format setting if present
+        current_format = self.config.get('dataset', 'format', 'json')
+        format_name = {
+            'json': 'JSON (Standard)',
+            'jsonl': 'JSONL (Line-oriented)',
+            'tei_xml': 'TEI XML (Preserves structure)'
+        }.get(current_format, current_format)
+        
+        console.print(f"\n[dim]Current dataset format: {format_name}[/dim]")
+        
         try:
             choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5", "6"])
             return choice
@@ -597,29 +607,116 @@ class UserInterface:
         """
         console.print("[bold]Building Dataset[/bold]")
         
+        # Let the user choose the dataset format
+        format_options = {
+            "1": "JSON (Standard format)",
+            "2": "JSONL (Line-oriented format for LLM training)",
+            "3": "TEI XML (Preserves XML structure with before/after expansion)"
+        }
+        
+        console.print("\n[bold]Dataset Format Options:[/bold]")
+        for key, desc in format_options.items():
+            console.print(f"  {key}. {desc}")
+            
+        selected_format = Prompt.ask(
+            "\nSelect dataset format", 
+            choices=list(format_options.keys()),
+            default="1"
+        )
+        
+        # Map selection to actual format string
+        format_map = {
+            "1": "json",
+            "2": "jsonl",
+            "3": "tei_xml"
+        }
+        
+        selected_format_type = format_map[selected_format]
+        console.print(f"[green]Selected format: {format_options[selected_format]}[/green]")
+        
+        # Determine whether to use TEI XML processing
+        use_tei_xml = selected_format_type == "tei_xml"
+        
         if self.user_decisions:
             console.print(f"[green]Using {len(self.user_decisions)} collected abbreviation expansions.[/green]")
             
-            entries = []
-            for abbr_text, decision in self.user_decisions.items():
-                entry = {
-                    'abbreviation': abbr_text,
-                    'expansion': decision['expansion'],
-                    'context_before': decision.get('context_before', ''),
-                    'context_after': decision.get('context_after', ''),
-                    'source': {
-                        'file': decision.get('file_path', ''),
-                        'confidence': decision.get('confidence', 1.0),
-                        'source_type': decision.get('source', 'user')
-                    }
-                }
+            if use_tei_xml:
+                # For TEI XML format, we need to reprocess the original files to capture XML structure
+                input_path = self.config.get("paths", "input_path")
                 
-                if 'metadata' in decision and decision['metadata']:
-                    entry['metadata'] = decision['metadata']
+                # Extract unique file paths from user decisions
+                file_paths = set()
+                for _, decision in self.user_decisions.items():
+                    if 'file_path' in decision and decision['file_path']:
+                        file_paths.add(decision['file_path'])
+                
+                console.print(f"[green]Found {len(file_paths)} source files for TEI XML processing.[/green]")
+                
+                if not file_paths:
+                    console.print("[yellow]No source files available for TEI XML format. Using standard format instead.[/yellow]")
+                    use_tei_xml = False
+                
+                all_abbreviations = []
+                
+                if use_tei_xml:
+                    from rich.progress import Progress
+                    with Progress() as progress:
+                        task = progress.add_task("[cyan]Processing source files...", total=len(file_paths))
+                        
+                        for file_path in file_paths:
+                            progress.update(task, description=f"[cyan]Processing {file_path}...[/cyan]")
+                            
+                            abbreviations, _ = self.tei_processor.parse_document(file_path)
+                            
+                            # Attach expansion data from user decisions
+                            for abbr in abbreviations:
+                                abbr_key = abbr.abbr_text if abbr.abbr_text else abbr.normalized_form
+                                if abbr_key in self.user_decisions:
+                                    abbr.expansion = self.user_decisions[abbr_key]['expansion']
+                                else:
+                                    # If we can't find the exact match, try a fuzzy match
+                                    for key, decision in self.user_decisions.items():
+                                        if (decision.get('file_path') == file_path and 
+                                            (key in abbr.abbr_text or abbr.abbr_text in key)):
+                                            abbr.expansion = decision['expansion']
+                                            break
+                            
+                            # Only keep abbreviations that have expansion data
+                            abbreviations = [a for a in abbreviations if hasattr(a, 'expansion')]
+                            all_abbreviations.extend(abbreviations)
+                            
+                            progress.update(task, advance=1)
                     
-                entries.append(entry)
-                
-            console.print(f"[green]Created {len(entries)} entries from user decisions.[/green]")
+                    console.print(f"[green]Processed {len(all_abbreviations)} abbreviations with XML structure.[/green]")
+                    
+                    if all_abbreviations:
+                        entries = self.dataset_builder.process_abbreviations_tei(all_abbreviations)
+                    else:
+                        console.print("[yellow]No abbreviations found with expansion data. Using standard format.[/yellow]")
+                        use_tei_xml = False
+            
+            # Fall back to standard processing if TEI XML processing failed
+            if not use_tei_xml:
+                entries = []
+                for abbr_text, decision in self.user_decisions.items():
+                    entry = {
+                        'abbreviation': abbr_text,
+                        'expansion': decision['expansion'],
+                        'context_before': decision.get('context_before', ''),
+                        'context_after': decision.get('context_after', ''),
+                        'source': {
+                            'file': decision.get('file_path', ''),
+                            'confidence': decision.get('confidence', 1.0),
+                            'source_type': decision.get('source', 'user')
+                        }
+                    }
+                    
+                    if 'metadata' in decision and decision['metadata']:
+                        entry['metadata'] = decision['metadata']
+                        
+                    entries.append(entry)
+                    
+                console.print(f"[green]Created {len(entries)} entries from user decisions.[/green]")
         else:
             input_path = self.config.get("paths", "input_path")
             output_path = self.config.get("paths", "output_path")
@@ -653,7 +750,10 @@ class UserInterface:
             
             console.print(f"[green]Extracted {len(all_abbreviations)} abbreviations.[/green]")
             
-            entries = self.dataset_builder.process_abbreviations(all_abbreviations)
+            if use_tei_xml:
+                entries = self.dataset_builder.process_abbreviations_tei(all_abbreviations)
+            else:
+                entries = self.dataset_builder.process_abbreviations(all_abbreviations)
         
         if not entries:
             console.print("[yellow]No entries to include in dataset.[/yellow]")
@@ -668,21 +768,38 @@ class UserInterface:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_filename = f"expansion_dataset_{timestamp}"
         
-        self.dataset_builder.save_dataset(train_set, os.path.join(dataset_dir, f"{base_filename}_train.json"))
-        self.dataset_builder.save_dataset(val_set, os.path.join(dataset_dir, f"{base_filename}_validation.json"))
-        self.dataset_builder.save_dataset(test_set, os.path.join(dataset_dir, f"{base_filename}_test.json"))
-        
-        system_message = self.config.get("language_model_integration", "openai", {}).get(
-            "system_message", 
-            "You are a linguist specializing in early modern texts. Your task is to expand abbreviated words."
-        )
-        
-        formatted_train = self.dataset_builder.format_for_llm_training(train_set, system_message)
+        # Save datasets with the selected format
         self.dataset_builder.save_dataset(
-            formatted_train, 
-            os.path.join(dataset_dir, f"{base_filename}_train_formatted.jsonl"), 
-            format="jsonl"
+            train_set, 
+            os.path.join(dataset_dir, f"{base_filename}_train.json"),
+            format=selected_format_type
         )
+        
+        self.dataset_builder.save_dataset(
+            val_set, 
+            os.path.join(dataset_dir, f"{base_filename}_validation.json"),
+            format=selected_format_type
+        )
+        
+        self.dataset_builder.save_dataset(
+            test_set, 
+            os.path.join(dataset_dir, f"{base_filename}_test.json"),
+            format=selected_format_type
+        )
+        
+        # Only create formatted training file for non-TEI XML formats
+        if not use_tei_xml:
+            system_message = self.config.get("language_model_integration", "openai", {}).get(
+                "system_message", 
+                "You are a linguist specializing in early modern texts. Your task is to expand abbreviated words."
+            )
+            
+            formatted_train = self.dataset_builder.format_for_llm_training(train_set, system_message)
+            self.dataset_builder.save_dataset(
+                formatted_train, 
+                os.path.join(dataset_dir, f"{base_filename}_train_formatted.jsonl"), 
+                format="jsonl"
+            )
         
         console.print(f"[bold green]Dataset creation complete![/bold green]")
         console.print(f"Train set: {len(train_set)} entries")
@@ -876,6 +993,11 @@ class UserInterface:
                 "enabled": self.config.get("language_model_integration", "enabled", True),
                 "provider": self.config.get("language_model_integration", "provider", "openai"),
                 "model_name": self.config.get("language_model_integration", "model_name", "gpt-4")
+            },
+            "Dataset": {
+                "format": self.config.get("dataset", "format", "json"),
+                "include_metadata": self.config.get("dataset", "include_metadata", True),
+                "train_ratio": self.config.get("dataset", "train_ratio", 0.8)
             }
         }
         
@@ -889,7 +1011,55 @@ class UserInterface:
                 table.add_row(category, setting, str(value))
         
         console.print(table)
-        console.print("\n[yellow]Settings modification is not implemented in this version.[/yellow]")
+        
+        # Offer to change dataset format
+        change_format = Confirm.ask("\nDo you want to change the dataset format?", default=False)
+        
+        if change_format:
+            format_options = {
+                "1": "JSON (Standard format)",
+                "2": "JSONL (Line-oriented format for LLM training)",
+                "3": "TEI XML (Preserves XML structure with before/after expansion)"
+            }
+            
+            console.print("\n[bold]Dataset Format Options:[/bold]")
+            for key, desc in format_options.items():
+                console.print(f"  {key}. {desc}")
+                
+            selected_format = Prompt.ask(
+                "\nSelect dataset format", 
+                choices=list(format_options.keys()),
+                default="1"
+            )
+            
+            # Map selection to actual format string
+            format_map = {
+                "1": "json",
+                "2": "jsonl",
+                "3": "tei_xml"
+            }
+            
+            selected_format_type = format_map[selected_format]
+            
+            # Update the config
+            self.config.set("dataset", "format", selected_format_type)
+            console.print(f"[green]Dataset format updated to: {format_options[selected_format]}[/green]")
+            
+            # Show updated settings table
+            settings["Dataset"]["format"] = selected_format_type
+            
+            updated_table = Table(title="Updated Settings")
+            updated_table.add_column("Category", style="cyan")
+            updated_table.add_column("Setting", style="blue")
+            updated_table.add_column("Value", style="green")
+            
+            for category, category_settings in settings.items():
+                for setting, value in category_settings.items():
+                    updated_table.add_row(category, setting, str(value))
+            
+            console.print(updated_table)
+        else:
+            console.print("\n[yellow]No changes made to settings.[/yellow]")
     
     def run(self):
         """Run the main application loop."""

@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich import print as rprint
+from lxml import etree
 
 from .config import Config
 from .tei.processor import TEIProcessor, AbbreviationInfo
@@ -152,8 +153,17 @@ class UserInterface:
         for option in options:
             console.print(f"  {option}")
         
-        choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5", "6"])
-        return choice
+        try:
+            choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5", "6"])
+            return choice
+        except KeyboardInterrupt:
+            console.print("[yellow]Keyboard interrupt. Exiting...[/yellow]")
+            import sys
+            sys.exit(0)
+        except EOFError:
+            console.print("[yellow]Input interrupted. Please try again.[/yellow]")
+            # Return a default choice that's safe (View Statistics)
+            return "4"
     
     def process_tei_documents(self):
         """
@@ -163,6 +173,12 @@ class UserInterface:
         """
         input_path = self.config.get("paths", "input_path")
         output_path = self.config.get("paths", "output_path")
+        target_language = self.config.get("settings", "language", "eng")
+        discarded_dir = self.config.get("paths", "discarded_directory", 
+                                       os.path.join(output_path, "discarded"))
+        
+        # Ensure discarded directory exists
+        os.makedirs(discarded_dir, exist_ok=True)
         
         # Find all XML files in the input directory
         xml_files = []
@@ -203,6 +219,61 @@ class UserInterface:
                 selected_files = [xml_files[0]]
         else:
             selected_files = xml_files
+        
+        # Check for language mismatch
+        files_to_process = []
+        files_with_mismatched_language = []
+        
+        console.print(f"[bold]Checking document languages (target: {target_language})...[/bold]")
+        for file_path in selected_files:
+            try:
+                # Parse the XML document just to check the language
+                parser = etree.XMLParser(remove_blank_text=True)
+                tree = etree.parse(str(file_path), parser=parser)
+                root = tree.getroot()
+                
+                # Get document language
+                doc_language = self.tei_processor.get_document_language(root)
+                if doc_language and doc_language != target_language:
+                    files_with_mismatched_language.append((file_path, doc_language))
+                else:
+                    files_to_process.append(file_path)
+            except Exception as e:
+                self.logger.error(f"Error checking language in {file_path}: {e}")
+                files_to_process.append(file_path)  # Process it anyway
+        
+        # Handle files with mismatched language
+        if files_with_mismatched_language:
+            console.print(f"[yellow]Found {len(files_with_mismatched_language)} files with language different from target ({target_language}):[/yellow]")
+            
+            lang_table = Table(title=f"Files with Non-{target_language} Language")
+            lang_table.add_column("File", style="cyan")
+            lang_table.add_column("Language", style="yellow")
+            
+            for file_path, lang in files_with_mismatched_language:
+                rel_path = os.path.relpath(file_path, input_path)
+                lang_table.add_row(rel_path, lang)
+            
+            console.print(lang_table)
+            
+            if Confirm.ask("Would you like to discard these files?"):
+                for file_path, _ in files_with_mismatched_language:
+                    # Move to discarded directory
+                    rel_path = os.path.relpath(file_path, input_path)
+                    dest_path = os.path.join(discarded_dir, os.path.basename(file_path))
+                    import shutil
+                    shutil.copy2(file_path, dest_path)
+                    console.print(f"[bold]Moved {rel_path} to discarded directory[/bold]")
+            else:
+                # Add them back to files to process
+                files_to_process.extend([f[0] for f in files_with_mismatched_language])
+        
+        if not files_to_process:
+            console.print("[yellow]No files to process after language filtering.[/yellow]")
+            return
+        
+        console.print(f"[bold]Processing {len(files_to_process)} files...[/bold]")
+        selected_files = files_to_process
         
         use_interactive = self.config.get("user_interface", "interactive_mode", True)
         
@@ -402,9 +473,13 @@ class UserInterface:
             
             console.print(table)
             
-            choice = Prompt.ask("Select an option", choices=[str(i) for i in range(1, len(suggestions)+1)] + ["c", "s"])
-            console.print(f"[bold]You selected:[/bold] {choice}")
-            
+            try:
+                choice = Prompt.ask("Select an option", choices=[str(i) for i in range(1, len(suggestions)+1)] + ["c", "s"])
+                console.print(f"[bold]You selected:[/bold] {choice}")
+            except EOFError:
+                console.print("[yellow]Input interrupted. Skipping this abbreviation.[/yellow]")
+                continue
+                
             if choice.lower() == "s":
                 console.print("Skipping this abbreviation.")
                 continue
@@ -414,19 +489,23 @@ class UserInterface:
             confidence = None
             
             if choice.lower() == "c":
-                custom_panel = Panel.fit("Please type your custom expansion and press Enter", title="Custom Expansion", border_style="green")
-                console.print(custom_panel)
-                custom_exp = console.input("Custom Expansion: ").strip()
-                console.print(f"[bold]You entered custom expansion:[/bold] {custom_exp}")
-                if not custom_exp or len(custom_exp) <= 1:
-                    console.print("[bold red]Custom expansion must be longer than one character. Skipping this abbreviation.[/bold red]")
+                try:
+                    custom_panel = Panel.fit("Please type your custom expansion and press Enter", title="Custom Expansion", border_style="green")
+                    console.print(custom_panel)
+                    custom_exp = console.input("Custom Expansion: ").strip()
+                    console.print(f"[bold]You entered custom expansion:[/bold] {custom_exp}")
+                    if not custom_exp or len(custom_exp) <= 1:
+                        console.print("[bold red]Custom expansion must be longer than one character. Skipping this abbreviation.[/bold red]")
+                        continue
+                    self.suggestion_generator.add_custom_expansion(abbr.abbr_text, custom_exp)
+                    self.suggestion_generator.save_user_dictionary()
+                    expansion = custom_exp
+                    source = "custom"
+                    confidence = 1.0
+                    console.print(f"[green]Custom expansion '{expansion}' recorded for '{abbr.abbr_text}'.[/green]")
+                except EOFError:
+                    console.print("[yellow]Input interrupted. Skipping this abbreviation.[/yellow]")
                     continue
-                self.suggestion_generator.add_custom_expansion(abbr.abbr_text, custom_exp)
-                self.suggestion_generator.save_user_dictionary()
-                expansion = custom_exp
-                source = "custom"
-                confidence = 1.0
-                console.print(f"[green]Custom expansion '{expansion}' recorded for '{abbr.abbr_text}'.[/green]")
             elif choice.isdigit() and 1 <= int(choice) <= len(suggestions):
                 idx = int(choice) - 1
                 expansion = suggestions[idx]['expansion']
@@ -647,47 +726,79 @@ class UserInterface:
         """Display statistics about processed documents and abbreviations."""
         console.print("[bold]Statistics[/bold]")
         
-        tei_stats = self.tei_processor.get_statistics()
+        # Create default statistics if TEIProcessor instance is not available
+        try:
+            from tei.processor import TEIProcessor
+            tei_processor = TEIProcessor(self.config)
+            tei_stats = tei_processor.stats
+        except (ImportError, AttributeError) as e:
+            console.print(f"Error: {e}")
+            tei_stats = {
+                'documents_processed': 0,
+                'abbreviations_found': 0,
+                'already_expanded': 0,
+                'malformed_abbr': 0
+            }
         
         table = Table(title="Processing Statistics")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
         
-        table.add_row("Documents Processed", str(tei_stats['documents_processed']))
-        table.add_row("Abbreviations Found", str(tei_stats['abbreviations_found']))
+        table.add_row("Documents Processed", str(tei_stats.get('documents_processed', 0)))
+        table.add_row("Abbreviations Found", str(tei_stats.get('abbreviations_found', 0)))
         table.add_row("Already Expanded", str(tei_stats.get('already_expanded', 0)))
         table.add_row("Malformed Abbreviations", str(tei_stats.get('malformed_abbr', 0)))
-        table.add_row("Current Session Expansions", str(self.abbreviations_expanded))
+        table.add_row("Current Session Expansions", str(getattr(self, 'abbreviations_expanded', 0)))
         
         console.print(table)
         
-        sugg_stats = self.suggestion_generator.get_statistics()
+        # Get suggestion statistics if available
+        try:
+            sugg_stats = self.suggestion_generator.get_statistics()
+        except AttributeError:
+            sugg_stats = {
+                'total_suggestions': 0,
+                'dictionary_matches': 0,
+                'pattern_matches': 0,
+                'wordnet_suggestions': 0,
+                'lm_suggestions': 0,
+                'failed_abbreviations': 0
+            }
         
         table = Table(title="Suggestion Statistics")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
         
-        table.add_row("Total Suggestions Generated", str(sugg_stats['total_suggestions']))
-        table.add_row("Dictionary Matches", str(sugg_stats['dictionary_matches']))
+        table.add_row("Total Suggestions Generated", str(sugg_stats.get('total_suggestions', 0)))
+        table.add_row("Dictionary Matches", str(sugg_stats.get('dictionary_matches', 0)))
         table.add_row("Pattern Matches", str(sugg_stats.get('pattern_matches', 0)))
-        table.add_row("WordNet Suggestions", str(sugg_stats['wordnet_suggestions']))
-        table.add_row("Language Model Suggestions", str(sugg_stats['lm_suggestions']))
-        table.add_row("Failed Abbreviations", str(sugg_stats['failed_abbreviations']))
+        table.add_row("WordNet Suggestions", str(sugg_stats.get('wordnet_suggestions', 0)))
+        table.add_row("Language Model Suggestions", str(sugg_stats.get('lm_suggestions', 0)))
+        table.add_row("Failed Abbreviations", str(sugg_stats.get('failed_abbreviations', 0)))
         
         console.print(table)
         
-        dataset_stats = self.dataset_builder.get_statistics()
+        # Get dataset statistics if available
+        try:
+            dataset_stats = self.dataset_builder.get_statistics()
+        except AttributeError:
+            dataset_stats = {
+                'total_entries': 0,
+                'train_entries': 0,
+                'validation_entries': 0,
+                'test_entries': 0
+            }
         
         table = Table(title="Dataset Statistics")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
         
-        table.add_row("Total Entries", str(dataset_stats['total_entries']))
-        table.add_row("Training Entries", str(dataset_stats['train_entries']))
-        table.add_row("Validation Entries", str(dataset_stats['validation_entries']))
-        table.add_row("Test Entries", str(dataset_stats['test_entries']))
-        table.add_row("Skipped Entries", str(dataset_stats['skipped_entries']))
-        table.add_row("Duplicate Entries", str(dataset_stats['duplicate_entries']))
+        table.add_row("Total Entries", str(dataset_stats.get('total_entries', 0)))
+        table.add_row("Training Entries", str(dataset_stats.get('train_entries', 0)))
+        table.add_row("Validation Entries", str(dataset_stats.get('validation_entries', 0)))
+        table.add_row("Test Entries", str(dataset_stats.get('test_entries', 0)))
+        table.add_row("Skipped Entries", str(dataset_stats.get('skipped_entries', 0)))
+        table.add_row("Duplicate Entries", str(dataset_stats.get('duplicate_entries', 0)))
         
         console.print(table)
     
@@ -731,22 +842,29 @@ class UserInterface:
         while True:
             choice = self.show_main_menu()
             
-            if choice == "1":
-                self.process_tei_documents()
-            elif choice == "2":
-                self.interactive_expansion()
-            elif choice == "3":
-                self.build_dataset()
-            elif choice == "4":
-                self.show_statistics()
-            elif choice == "5":
-                self.show_settings()
-            elif choice == "6":
-                if self.user_decisions:
-                    if Confirm.ask("Save your work before exiting?"):
-                        self._save_user_decisions()
-                console.print("[bold green]Thank you for using Amanuensis 2.0![/bold green]")
-                break
+            try:
+                if choice == "1":
+                    self.process_tei_documents()
+                elif choice == "2":
+                    self.interactive_expansion()
+                elif choice == "3":
+                    self.build_dataset()
+                elif choice == "4":
+                    self.show_statistics()
+                elif choice == "5":
+                    self.show_settings()
+                elif choice == "6":
+                    if self.user_decisions:
+                        try:
+                            if Confirm.ask("Save your work before exiting?"):
+                                self._save_user_decisions()
+                        except EOFError:
+                            console.print("[yellow]Input interrupted. Exiting without saving.[/yellow]")
+                    console.print("[bold green]Thank you for using Amanuensis 2.0![/bold green]")
+                    break
+            except EOFError:
+                console.print("[yellow]Input interrupted. Returning to main menu.[/yellow]")
+                continue
 
 
 if __name__ == '__main__':
